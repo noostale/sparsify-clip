@@ -1,3 +1,3 @@
 # sparsify-clip
 
-This is a first commit test
+This is a test
