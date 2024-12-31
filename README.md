@@ -12,10 +12,11 @@ The COCO dataset will be used to treain the model leveraging the image-caption p
 
 ### Download COCO Dataset
 
+The test dataset is not public, we can use the validation-set as test-set
+
 ```bash
-!wget http://images.cocodataset.org/zips/train2017.zip -O coco_train2017.zip
-!wget http://images.cocodataset.org/zips/val2017.zip -O coco_val2017.zip
-!wget http://images.cocodataset.org/annotations/annotations_trainval2017.zip -O coco_ann2017.zip
+wget http://images.cocodataset.org/zips/train2017.zip
+wget http://images.cocodataset.org/zips/val2017.zip 
 ```
 
 
