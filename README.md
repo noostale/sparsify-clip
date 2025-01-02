@@ -2,7 +2,16 @@
 
 My aim is to use the COCO dataset to train a Contrastive Language–Image model.
 
-# Pre-requisites
+## Conda Environment
+
+The conda environment can be created using the following command:
+
+```bash
+conda env create -f environment.yml
+```
+
+This will create a new environment called `sparsify-clip`.
+
 
 ## COCO Dataset
 
@@ -10,17 +19,25 @@ My aim is to use the COCO dataset to train a Contrastive Language–Image model.
 
 The COCO dataset will be used to treain the model leveraging the image-caption pairs.
 
-### Download COCO Dataset
+## Download COCO Dataset
 
 The test dataset is not public, we can use the validation-set as test-set
+
+The dataset can be downloaded using the following commands:
 
 ```bash
 wget http://images.cocodataset.org/zips/train2017.zip
 wget http://images.cocodataset.org/zips/val2017.zip 
+wget http://images.cocodataset.org/annotations/annotations_trainval2017.zip
 ```
 
+The data folder should look like this:
 
-# Libraries
+```bash
+├── data
+│   └── coco
+│       ├── annotations (extract here the annotations_trainval2017.zip)
+│       └── images (extract here the train2017.zip and val2017.zip)
+```
 
-[pycocotools](https://pypi.org/project/pycocotools/)
 
