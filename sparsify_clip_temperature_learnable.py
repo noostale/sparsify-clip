@@ -27,12 +27,6 @@ import math
 import umap
 
 
-# In[36]:
-
-
-
-
-
 # In[2]:
 
 
@@ -111,7 +105,17 @@ def visualize_embeddings(text_embeddings, vision_embeddings,
 
     # Combine for joint dimensionality reduction
     all_data = np.concatenate([text_np, vision_np], axis=0)
+    
+    #NORMALIZATION
+    norms = np.linalg.norm(all_data, axis=1, keepdims=True)
 
+    # Avoid division by zero
+    norms = np.where(norms == 0, 1, norms)
+
+    # Normalize each vector
+    all_data = all_data / norms
+    
+    
     # Apply dimensionality reduction
     if method.lower() == "pca":
         reducer = PCA(n_components=3)
@@ -397,6 +401,20 @@ def evaluate_model(model: torch.nn.Module, test_loader: DataLoader, device: torc
     # Concatenate all embeddings
     all_image_embeds = torch.cat(all_image_embeds, dim=0)  # Shape: [N, D]
     all_text_embeds = torch.cat(all_text_embeds, dim=0)    # Shape: [N, D]
+    
+    
+    visualize_embeddings(all_text_embeds, 
+                                all_image_embeds, 
+                                sample_size=1000, 
+                                method='umap', 
+                                title="CLIP Embeddings Visualization",
+                                save_path="embeddings_plot_umap.png")
+    visualize_embeddings(all_text_embeds, 
+                                all_image_embeds, 
+                                sample_size=1000, 
+                                method='tsne',
+                                title="CLIP Embeddings Visualization",
+                                save_path="embeddings_plot_tsne.png")
 
     # Normalize embeddings for more stable retrieval and metric computations
     all_image_embeds = F.normalize(all_image_embeds, dim=-1)
@@ -464,8 +482,10 @@ def train_model(config, train_loader, test_loader, device):
     # Move the model to multiple GPUs
     model = model.to(device)
     model = torch.nn.DataParallel(model, device_ids=[0, 1, 2, 3])  # Use 4 GPUs
+    
+    contrastive_temperature_learnable = torch.nn.Parameter(torch.tensor(temperature))
 
-    optimizer = optim.AdamW(model.parameters(), lr=lr)
+    optimizer = optim.AdamW(list(model.parameters())+[contrastive_temperature_learnable], lr=lr)
 
     current_batch = 0
     
@@ -494,12 +514,12 @@ def train_model(config, train_loader, test_loader, device):
             
             # Compute loss based on the experiment type
             if config["loss_type"] == "anchor":
-                loss = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
+                loss = contrastive_loss(image_embeds, text_embeds, temperature=contrastive_temperature_learnable)
             elif config["loss_type"] == "anchor+lunif":
                 lunif_img = lunif_loss(image_embeds)
                 lunif_txt = lunif_loss(text_embeds)
                 lunif = (lunif_img + lunif_txt) / 2
-                loss = contrastive_loss(image_embeds, text_embeds, temperature=temperature) + lunif
+                loss = contrastive_loss(image_embeds, text_embeds, temperature=contrastive_temperature_learnable) + lunif
             elif config["loss_type"] == "lunif_n_iters+frozen(text_embed)":
                 if current_batch <= config["lunif_n_iters"]:
                     lunif_img = lunif_loss(image_embeds)
@@ -508,7 +528,7 @@ def train_model(config, train_loader, test_loader, device):
                     loss = lunif
                 else: # train on anchor loss with frozen text embeddings
                     text_embeds = text_embeds.detach()
-                    loss = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
+                    loss = contrastive_loss(image_embeds, text_embeds, temperature=contrastive_temperature_learnable)
                     
             wandb.log({"train_loss": loss.item()})
 
@@ -516,46 +536,12 @@ def train_model(config, train_loader, test_loader, device):
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            
-            """if current_batch % config["visualize_every_n_batches"] == 0 and config["visualize_every_n_batches"] != False:
-                visualize_embeddings(text_embeds, 
-                                    image_embeds, 
-                                    sample_size=1000, 
-                                    method='umap', 
-                                    title="CLIP Embeddings Visualization",
-                                    save_path="embeddings_plot.png")
-                
-                visualize_embeddings(text_embeds, 
-                                    image_embeds, 
-                                    sample_size=1000, 
-                                    method='umap', 
-                                    title="CLIP Embeddings Visualization",
-                                    save_path="embeddings_plot.png")
-            
-            if current_batch % config["evaluate_every_n_batches"] == 0 and config["evaluate_every_n_batches"] != False:
-                print(f"[Epoch {epoch+1}/{epochs}]  Batch: {current_batch}  Loss: {loss.item():.5f}")
-                evaluate_model(model, test_loader, device)"""
-
-        
-        #print(f"[Epoch {epoch+1}/{epochs}]  Loss: {loss.item():.4f}")
         
         if config["evaluate_and_visualize_every_epoch"] == True:
             evaluate_model(model, test_loader, device)
             
-            visualize_embeddings(text_embeds, 
-                                image_embeds, 
-                                sample_size=1000, 
-                                method='umap', 
-                                title="CLIP Embeddings Visualization",
-                                save_path="embeddings_plot_umap.png")
-            visualize_embeddings(text_embeds, 
-                                image_embeds, 
-                                sample_size=1000, 
-                                method='tsne',
-                                title="CLIP Embeddings Visualization",
-                                save_path="embeddings_plot_tsne.png")
-        
-        if config["save_checkpoint_every_n_epochs"] % (epoch+1) == 0:
+            
+        if (epoch+1) % config["save_checkpoint_every_n_epochs"]  == 0:
             torch.save(model.state_dict(), f"models/model_" + config["run_name"] + f"_epoch_{epoch+1}.pt")
             print(f"Model saved at epoch {epoch+1}")
         
@@ -575,11 +561,15 @@ def dataset_loader(config):
     # Path to test (val) images and annotations
     test_image_dir = './data/coco/images/val2017/'                          # Path to val2017 images
     test_annotation_file = './data/coco/annotations/captions_val2017.json'  # Path to val2017 captions
-
+    
+    mean = [0.48145466, 0.4578275, 0.40821073]
+    std = [0.26862954, 0.26130258, 0.27577711]
+    
     # Define the transform to be applied to the images
     transform = transforms.Compose([
         transforms.Resize((224, 224)),  # Resize the image to the model's required input size
-        transforms.ToTensor()
+        transforms.ToTensor(),
+        transforms.Normalize(mean, std)
     ])
 
     # Create the training dataset
@@ -699,7 +689,7 @@ config = {
     
     "temperature":                  0.07,
     
-    "loss_type":                    "anchor+lunif",   # anchor, anchor+lunif
+    "loss_type":                    "MANUAL",   # anchor, anchor+lunif
     "lunif_n_iters":                300,
     
     
@@ -733,225 +723,3 @@ if __name__ == "__main__":
     #config["run_name"] = config["model"] + "_" + config["loss_type"] + "_" + config["run_name"] 
     #print("\nTraining lunif_n_iters+frozen(text_embed) model")
     #main(config)
-
-
-# In[173]:
-
-
-""" %doctest_mode
-
-
-def dataset_details():
-    # Print dataset details
-    print('Number of samples:', len(train_coco)) # 118287 images
-
-    # Access a specific sample (4th sample here)
-    img, target = train_coco[3]  # Load the 4th sample (index 3)
-
-    # Display information about the sample
-    print("Image Size:", img.size())  # Torch tensor size
-    #plt.imshow(img.permute(1, 2, 0))  # Display the image
-    print("Captions:", target)  # Captions for the image
-
-for images, captions_list in train_loader:
-    # images.shape is e.g. (N, 3, 224, 224)
-    # captions_list has length N, but each item might be a tuple of possible captions
-
-    plt.imshow(images[0].permute(1, 2, 0))
-    plt.show()
-    plt.imshow(images[1].permute(1, 2, 0))
-    plt.show()
-
-    print("Image batch size:", images.shape[0], "Shape:", images.shape)
-    print("Captions list length:", len(captions_list))
-    
-    print("Captions list:", list(captions_list))
-
-    print("Number of chosen captions:", len(list(captions_list[0])))
-    
-    captions = list(captions_list[0])
-
-    # Then tokenize
-    text_tokens = tokenizer.tokenize(captions)
-    print("Text tokens shape:", text_tokens.shape)
-
-    # Now encode
-    #image_embeds = model.encode_image(images.to(device))
-    #text_embeds = model.encode_text(text_tokens.to(device))
-
-    # Should both be shape (N, D)
-    #print("Image embeds shape:", image_embeds.shape)
-    #print("Text  embeds shape:", text_embeds.shape)
-
-    break  # just to test one batch
-    
-
-def collate_fn_debug(batch):
-    print("Bath type:", type(batch)) # This is a list
-    print("Batch size:", len(batch))
-    print("Batch:", batch)
-    images, captions = zip(*batch)
-    
-    print("Images type:", type(images))
-    print("Images size:", len(images))
-    print("Images:", images)
-    
-    print("Captions type:", type(captions))
-    print("Captions size:", len(captions))
-    print("Captions:", captions) # This is a tuple of lists, each list contains 5 captions for each image
-    
-    # Select one caption per image
-    sel_captions = []
-    for list_captions in captions:
-        #print("List Captions:", list_captions)
-        caption = random.choice(list_captions)
-        sel_captions.append(caption)
-    
-    print("Selected Captions:", sel_captions)    
-
-
-
-for images, captions_list in train_loader:
-    break
-
-# DONE: ensure that each tuple of captions has the same length, or the data loader will fail (defalut is collate(samples, collate_fn_map=collate_fn_map) from error message)
-
- """
- 
- 
- 
- 
-"""def compute_metric_ret(score_matrix, ids, ids_txt, direction='forward'):
-    
-    # Check that the score matrix has the correct shape
-    assert score_matrix.shape == (len(ids_txt),len(ids))
-
-    if direction == 'forward': ### text-to-vision retrieval
-        indice_matrix = score_matrix.sort(dim=-1,descending=True)[1].tolist()
-        rank = []
-        for i in range(len(ids_txt)):
-            # gt_indice = ids.index(ids_txt[i][0])
-            gt_indice = ids.index(ids_txt[i])
-            rank.append(indice_matrix[i].index(gt_indice))
-        
-        rank = torch.tensor(rank).to(score_matrix)
-        
-        vr_r1 = (rank < 1).sum().item() / len(ids_txt)
-        vr_r5 = (rank < 5).sum().item() / len(ids_txt)
-        vr_r10 = (rank < 10).sum().item() / len(ids_txt)
-        v_medianR = torch.median(rank).item() +1
-        v_meanR = torch.mean(rank).item() +1
- 
-        eval_log = {'forward_r1': round(vr_r1*100,3),
-                    'forward_recall': f'{round(vr_r1*100,1)}/{round(vr_r5*100,1)}/{round(vr_r10*100,3)}',
-                    'forward_ravg': round((vr_r1 + vr_r5 + vr_r10)/3 *100,3)
-                   }
-   
-    else: ### vision-to-text retrieval
-       
-        indice_matrix = score_matrix.sort(dim=0,descending=True)[1].permute(1,0).tolist()
-        rank = []
-        for i in range(len(ids)):
-            gt_indices=[]
-            for idx, id in enumerate(ids_txt):
-                if id == ids[i]:
-                    gt_indices.append(idx)
-
-            rank.append(min([indice_matrix[i].index(idx) for idx in gt_indices]))
-        
-        rank = torch.tensor(rank).to(score_matrix)
-        
-        tr_r1 = (rank < 1).sum().item() / len(ids)
-        tr_r5 = (rank < 5).sum().item() / len(ids)
-        tr_r10 = (rank < 10).sum().item() / len(ids)
-        t_medianR = torch.median(rank).item() +1
-        t_meanR = torch.mean(rank).item() +1
-
-        eval_log = {
-                    'backward_r1': round(tr_r1*100,3),
-                    'backward_recall': f'{round(tr_r1*100,1)}/{round(tr_r5*100,1)}/{round(tr_r10*100,3)}',
-                    'backward_ravg': round((tr_r1 + tr_r5 + tr_r10)/3 *100,3)
-                  }
-    
-    return eval_log"""
-
-"""def evaluate_model(model, test_loader, device):
-    '''
-    Evaluate the (OpenCLIP) model on the given test_loader by computing
-    text-to-image and image-to-text retrieval metrics.
-
-    Args:
-        model (nn.Module): The trained (DataParallel) model.
-        test_loader (DataLoader): A DataLoader for the evaluation set.
-        device (torch.device): The device (CPU or GPU).
-    '''
-    
-    # Put model into eval mode
-    model.eval()
-    
-    # Prepare storage
-    all_image_embeds = []
-    all_text_embeds  = []
-    
-    # IDs for retrieval
-    # We'll assign each sample a unique ID. Because your `collate_fn` is
-    # picking exactly one caption per image, we can treat each batch entry
-    # as a 1:1 mapping of (image_i <-> text_i).
-    ids_img = []
-    ids_txt = []
-    
-    current_index = 0
-
-    # No gradient needed during evaluation
-    with torch.no_grad():
-        for images, captions_list in tqdm.tqdm(test_loader, desc="Evaluating"):
-            # Move images to device
-            images = images.to(device)
-
-            # Tokenize captions
-            text_tokens = tokenizer.tokenize(captions_list)
-            text_tokens = text_tokens.to(device)
-
-            # Extract embeddings using the .module references in DataParallel
-            image_embeds = model.module.encode_image(images)
-            text_embeds  = model.module.encode_text(text_tokens)
-
-            # Move them to CPU for later concatenation
-            image_embeds = image_embeds.cpu()
-            text_embeds  = text_embeds.cpu()
-            
-            # Track
-            bs = images.size(0)
-            all_image_embeds.append(image_embeds)
-            all_text_embeds.append(text_embeds)
-
-            # For retrieval, we label these samples from current_index to current_index + bs - 1
-            sample_ids = list(range(current_index, current_index + bs))
-            ids_img.extend(sample_ids)
-            ids_txt.extend(sample_ids)
-            current_index += bs
-    
-    # Concatenate everything
-    all_image_embeds = torch.cat(all_image_embeds, dim=0)  # shape [N, embed_dim]
-    all_text_embeds  = torch.cat(all_text_embeds, dim=0)   # shape [N, embed_dim]
-
-    # Normalize embeddings for more stable retrieval
-    all_image_embeds = F.normalize(all_image_embeds, dim=-1)
-    all_text_embeds  = F.normalize(all_text_embeds, dim=-1)
-
-    # Compute pairwise similarity: [N_text, N_image]
-    # Because we aligned IDs, this is effectively [N, N].
-    similarity_matrix = all_text_embeds @ all_image_embeds.t()
-
-    # Use the given function compute_metric_ret to compute retrieval metrics.
-    # text->image: direction='forward'
-    log_forward  = compute_metric_ret(similarity_matrix, ids_img, ids_txt, direction='forward')
-    # image->text: direction='backward'
-    log_backward = compute_metric_ret(similarity_matrix, ids_img, ids_txt, direction='backward')
-
-    # You can combine or print them:
-    final_log = {**log_forward, **log_backward}
-    print("Evaluation Results:", final_log)
-
-    return final_log"""
-
