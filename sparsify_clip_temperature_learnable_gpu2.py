@@ -124,7 +124,7 @@ def visualize_embeddings(text_embeddings, vision_embeddings,
         reducer = TSNE(n_components=3, perplexity=30, max_iter=1000, random_state=42)
         reduced = reducer.fit_transform(all_data)
     elif method.lower() == "umap":
-        reducer = umap.UMAP(n_components=3, random_state=42, n_jobs=1)
+        reducer = umap.UMAP(n_components=3) # TODO: check random state if is needed, or go with GPU version
         reduced = reducer.fit_transform(all_data)
     else:
         raise NotImplementedError("Only 'pca', 'tsne', and 'umap' are implemented.")
@@ -622,20 +622,22 @@ def dataset_loader(config):
         test_coco = Subset(test_coco, subset_indices)
 
     # Every image has 5 captions at max, we need to sample one of them
-    # Create collate function to sample one caption per image
+    # Create collate function to sample one caption per image 
     def collate_fn(batch):
         images, captions = zip(*batch)
         images = torch.stack(images, 0)
         sel_captions = []
+        
         for list_captions in captions:
             caption = random.choice(list_captions)
             sel_captions.append(caption)
+
         return images, sel_captions
 
     # Create DataLoader
     batch_size = config["batch_size"]
-    train_loader = DataLoader(train_coco, batch_size=batch_size, shuffle=True , drop_last=True, collate_fn=collate_fn, num_workers=12)
-    test_loader  = DataLoader(test_coco , batch_size=batch_size, shuffle=False, drop_last=True, collate_fn=collate_fn, num_workers=12)
+    train_loader = DataLoader(train_coco, batch_size=batch_size, shuffle=True , drop_last=True, collate_fn=collate_fn, num_workers=12, persistent_workers=True)
+    test_loader  = DataLoader(test_coco , batch_size=batch_size, shuffle=False, drop_last=True, collate_fn=collate_fn, num_workers=12, persistent_workers=True)
     
     return train_loader, test_loader
 
@@ -697,15 +699,16 @@ def main(config):
 
 # In[ ]:
 
+#####%%prun
 
 config = {
     "run_name": "{}".format(datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")),  # A readable name for this run
-    "device_id": 1,      # GPU id
+    "device_id": 2,      # GPU id
     "seed": 42,     # Random seed
     
     "learning_rate": 1e-4,
     "batch_size": 256,
-    "epochs": 100, # TODO: 100
+    "epochs": 30, # TODO: 100
     "model": "RN50",
     
     "temperature": 0.07,
@@ -724,17 +727,17 @@ config = {
 if __name__ == "__main__":
     
     # Baseline
-    config["loss_type"] = "anchor"
-    config["run_name"] = config["model"] + "_" + config["loss_type"] + "_" + config["run_name"] 
-    print("\nTraining Baseline model")
-    main(config)
+    #config["loss_type"] = "anchor"
+    #config["run_name"] = config["model"] + "_" + config["loss_type"] + "_" + config["run_name"] 
+    #print("\nTraining Baseline model")
+    #main(config)
     
     
     # Anchor + Lunif
-    #config["loss_type"] = "anchor+lunif"
-    #config["run_name"] = config["model"] + "_" + config["loss_type"] + "_" + config["run_name"] 
-    #print("\nTraining Anchor + Lunif model")
-    #main(config)
+    config["loss_type"] = "anchor+lunif"
+    config["run_name"] = config["model"] + "_" + config["loss_type"] + "_" + config["run_name"] 
+    print("\nTraining Anchor + Lunif model")
+    main(config)
     
     
     # Lunif(50itr)+frozen(text_embed)
@@ -742,3 +745,4 @@ if __name__ == "__main__":
     #config["run_name"] = config["model"] + "_" + config["loss_type"] + "_" + config["run_name"] 
     #print("\nTraining lunif_n_iters+frozen(text_embed) model")
     #main(config)
+# %%
