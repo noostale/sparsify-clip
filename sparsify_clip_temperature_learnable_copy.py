@@ -121,10 +121,10 @@ def visualize_embeddings(text_embeddings, vision_embeddings,
         reducer = PCA(n_components=3)
         reduced = reducer.fit_transform(all_data)
     elif method.lower() == "tsne":
-        reducer = TSNE(n_components=3, perplexity=30, max_iter=1000, random_state=42)
+        reducer = TSNE(n_components=3, perplexity=30, max_iter=1000)
         reduced = reducer.fit_transform(all_data)
     elif method.lower() == "umap":
-        reducer = umap.UMAP(n_components=3) # TODO: check random state if is needed, or go with GPU version
+        reducer = umap.UMAP(n_components=3, n_jobs=8)
         reduced = reducer.fit_transform(all_data)
     else:
         raise NotImplementedError("Only 'pca', 'tsne', and 'umap' are implemented.")
@@ -425,18 +425,18 @@ def evaluate_model(model: torch.nn.Module, test_loader: DataLoader, device: torc
     all_text_embeds = torch.cat(all_text_embeds, dim=0)    # Shape: [N, D]
     
     
-    visualize_embeddings(all_text_embeds, 
-                                all_image_embeds, 
-                                sample_size=1000, 
-                                method='umap', 
-                                title="CLIP Embeddings Visualization",
-                                save_path="embeddings_plot_umap.png")
     """visualize_embeddings(all_text_embeds, 
                                 all_image_embeds, 
-                                sample_size=1000, 
+                                sample_size=500, 
+                                method='umap', 
+                                title="CLIP Embeddings Visualization",
+                                save_path="embeddings_plot_umap.png")"""
+    visualize_embeddings(all_text_embeds, 
+                                all_image_embeds, 
+                                sample_size=500, 
                                 method='tsne',
                                 title="CLIP Embeddings Visualization",
-                                save_path="embeddings_plot_tsne.png")"""
+                                save_path="embeddings_plot_tsne.png")
 
     # should be already normalized
     # Normalize embeddings for more stable retrieval and metric computations
@@ -538,10 +538,26 @@ def train_model(config, train_loader, test_loader, device):
             if config["loss_type"] == "anchor":
                 loss = contrastive_loss(image_embeds, text_embeds, temperature=contrastive_temperature_learnable)
             elif config["loss_type"] == "anchor+lunif":
-                lunif_img = lunif_loss(image_embeds)
+            
+                """lunif_img = lunif_loss(image_embeds)
                 lunif_txt = lunif_loss(text_embeds)
                 lunif = (lunif_img + lunif_txt) / 2
-                loss = contrastive_loss(image_embeds, text_embeds, temperature=contrastive_temperature_learnable) + lunif
+                anchor = contrastive_loss(image_embeds, text_embeds, temperature=contrastive_temperature_learnable)
+                anchor_val = anchor.item()
+                lunif_val = lunif.item()
+                scale = 1.0
+                if lunif_val > 1e-9:
+                    scale = anchor_val / (lunif_val + 1e-9)
+                # Rescale the lunif loss
+                lunif = lunif * scale
+                loss = anchor + lunif"""
+                
+                loss = contrastive_loss(image_embeds, text_embeds, temperature=contrastive_temperature_learnable) + (lunif_loss(image_embeds) + lunif_loss(text_embeds)) / 2
+                
+            
+            elif config["loss_type"] == "lunif":
+                loss = (lunif_loss(image_embeds) + lunif_loss(text_embeds)) / 2
+                
             elif config["loss_type"] == "lunif_n_iters+frozen(text_embed)":
                 if current_batch <= config["lunif_n_iters"]:
                     lunif_img = lunif_loss(image_embeds)
@@ -553,6 +569,7 @@ def train_model(config, train_loader, test_loader, device):
                     loss = contrastive_loss(image_embeds, text_embeds, temperature=contrastive_temperature_learnable)
                     
             wandb.log({"train_loss": loss.item()})
+            wandb.log({"contrastive_temperature_learnable": contrastive_temperature_learnable.item()})
 
             # Backprop
             optimizer.zero_grad()
@@ -622,22 +639,20 @@ def dataset_loader(config):
         test_coco = Subset(test_coco, subset_indices)
 
     # Every image has 5 captions at max, we need to sample one of them
-    # Create collate function to sample one caption per image 
+    # Create collate function to sample one caption per image
     def collate_fn(batch):
         images, captions = zip(*batch)
         images = torch.stack(images, 0)
         sel_captions = []
-        
         for list_captions in captions:
             caption = random.choice(list_captions)
             sel_captions.append(caption)
-
         return images, sel_captions
 
     # Create DataLoader
     batch_size = config["batch_size"]
-    train_loader = DataLoader(train_coco, batch_size=batch_size, shuffle=True , drop_last=True, collate_fn=collate_fn, num_workers=12, persistent_workers=True)
-    test_loader  = DataLoader(test_coco , batch_size=batch_size, shuffle=False, drop_last=True, collate_fn=collate_fn, num_workers=12, persistent_workers=True)
+    train_loader = DataLoader(train_coco, batch_size=batch_size, shuffle=True , drop_last=True, collate_fn=collate_fn, num_workers=12)
+    test_loader  = DataLoader(test_coco , batch_size=batch_size, shuffle=False, drop_last=True, collate_fn=collate_fn, num_workers=12)
     
     return train_loader, test_loader
 
@@ -699,22 +714,21 @@ def main(config):
 
 # In[ ]:
 
-#####%%prun
 
 config = {
     "run_name": "{}".format(datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")),  # A readable name for this run
-    "device_id": 2,      # GPU id
+    "device_id": 0,      # GPU id
     "seed": 42,     # Random seed
     
     "learning_rate": 1e-4,
     "batch_size": 256,
-    "epochs": 30, # TODO: 100
+    "epochs": 20, # TODO: 100
     "model": "RN50",
     
     "temperature": 0.07,
     
     "loss_type": "MANUAL",   # anchor, anchor+lunif
-    "lunif_n_iters": 200,
+    "lunif_n_iters": 15,
     
     
     "save_checkpoint_every_n_epochs": 10,
@@ -736,7 +750,7 @@ if __name__ == "__main__":
     # Anchor + Lunif
     config["loss_type"] = "anchor+lunif"
     config["run_name"] = config["model"] + "_" + config["loss_type"] + "_" + config["run_name"] 
-    print("\nTraining Anchor + Lunif model")
+    print("\nTraining", config["loss_type"], "model")
     main(config)
     
     
@@ -745,4 +759,3 @@ if __name__ == "__main__":
     #config["run_name"] = config["model"] + "_" + config["loss_type"] + "_" + config["run_name"] 
     #print("\nTraining lunif_n_iters+frozen(text_embed) model")
     #main(config)
-# %%
