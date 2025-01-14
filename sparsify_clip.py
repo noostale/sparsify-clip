@@ -147,7 +147,7 @@ def random_alignment_loss(x, y):
 
     return (x - y).norm(dim=1).pow(alpha).mean()
 
-def lalign(x, y, alpha=2):
+def lalign_loss(x, y, alpha=2):
     return (x - y).norm(dim=1).pow(alpha).mean()
 
 # In[3]:
@@ -562,23 +562,23 @@ def evaluate_model(model: torch.nn.Module, test_loader: DataLoader, device: torc
     
     visualize_embeddings(all_text_embeds, 
                                 all_image_embeds, 
-                                sample_size=500, 
+                                sample_size=512, 
                                 method='umap', 
                                 title="CLIP Embeddings Visualization",
-                                save_path="embeddings_plot_umap.png")
+                                save_path="plots/embeddings_plot_umap.png")
     visualize_embeddings(all_text_embeds, 
                                 all_image_embeds, 
-                                sample_size=500, 
+                                sample_size=512, 
                                 method='tsne',
                                 title="CLIP Embeddings Visualization",
-                                save_path="embeddings_plot_tsne.png")
+                                save_path="plots/embeddings_plot_tsne.png")
     
     visualize_embeddings(all_text_embeds, 
                                 all_image_embeds, 
-                                sample_size=500, 
+                                sample_size=512, 
                                 method='pca',
                                 title="CLIP Embeddings Visualization",
-                                save_path="embeddings_plot_pca.png")
+                                save_path="plots/embeddings_plot_pca.png")
 
     # should be already normalized
     # Normalize embeddings for more stable retrieval and metric computations
@@ -598,7 +598,7 @@ def evaluate_model(model: torch.nn.Module, test_loader: DataLoader, device: torc
     gap = compute_gap(all_image_embeds, all_text_embeds)
     mean_ang_image = compute_mean_angular_value_of_a_modality(all_image_embeds)
     mean_ang_text = compute_mean_angular_value_of_a_modality(all_text_embeds)
-    #uniformity_metric = uniformity(all_image_embeds, all_text_embeds)
+    uniformity_metric = uniformity(all_image_embeds, all_text_embeds)
     mean_cos_true_pairs = mean_distance_of_true_pairs(all_image_embeds, all_text_embeds)
 
     # Combine all metrics into final_log
@@ -608,7 +608,7 @@ def evaluate_model(model: torch.nn.Module, test_loader: DataLoader, device: torc
         'gap': round(gap, 4),
         'mean_angular_value_image': round(mean_ang_image, 4), # round to 4 decimal places
         'mean_angular_value_text': round(mean_ang_text, 4),
-        #'uniformity': round(uniformity_metric, 4),
+        'uniformity': round(uniformity_metric, 4),
         'mean_cosine_similarity_true_pairs': round(mean_cos_true_pairs, 4)
     }
 
@@ -617,7 +617,6 @@ def evaluate_model(model: torch.nn.Module, test_loader: DataLoader, device: torc
     
     wandb.log(final_log)
 
-    
     model.train()
     return final_log
 
@@ -634,52 +633,55 @@ def train_model(config, train_loader, test_loader, device):
         device=device
     )
     
+    # Get the tokenizer from the model
     tokenizer = open_clip.get_tokenizer(config["model"])
     
     # Put the model into training mode
     model.train()
 
-    # If you want to fine-tune *everything* from scratch, ensure all parameters require grad:
+    # Require gradients for all parameters to train from scratch
     for param in model.parameters():
         param.requires_grad = True
-
-    # Set up training parameters from the config
-    lr = config["learning_rate"]
-    epochs = config["epochs"]
-    temperature = config["temperature"]
-
-    # Move the model to multiple GPUs
+        
+    # Move the model to given device
     model = model.to(device)
     model = torch.nn.DataParallel(model)
 
+    # Set up training parameters
+    lr = config["learning_rate"]
+    epochs = config["epochs"]
+    temperature = config["anchor_temperature"]
+    start_epoch = 0
+
+    # Load the roberta model for anchor-roberta loss
     if config["loss_type"] == "anchor-roberta":
         roberta = SentenceTransformer('stsb-roberta-large').to(device)
     
-    contrastive_temperature_learnable = torch.nn.Parameter(torch.tensor(temperature))
+    # Set up learnable temperature if required
+    if config["anchor_temperature_learnable"]:
+        temperature = torch.nn.Parameter(torch.tensor(temperature))
     
     # Load checkpoint if resuming
-    if "resume_checkpoint" in config:
+    if config["resume_checkpoint"]:
         print(f"Resuming training from {config['resume_checkpoint']} at epoch {config['resume_epoch']}")
         checkpoint = torch.load(config["resume_checkpoint"])
         model.load_state_dict(checkpoint)
         start_epoch = config["resume_epoch"]
-    else:
-        start_epoch = 0
 
-    optimizer = optim.AdamW(list(model.parameters())+[contrastive_temperature_learnable], lr=lr)
+    # Set up the parameters and optimizer 
+    parameters = list(model.parameters()) + [temperature] if config["temperature_learnable"] else list(model.parameters())
+    optimizer = optim.AdamW(parameters, lr=lr)
+    
+    # Set up the learning rate scheduler as 20% warmup
     t_total = len(train_loader) * config["epochs"]
     num_warmup_steps = int(0.20 * t_total)
-    scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps= num_warmup_steps, num_training_steps= t_total)
+    scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=t_total)
 
-
-    current_batch = 0
-    loss = 0
-
-    model.eval()
+    # Make a prior evaluation of the model
     evaluate_model(model, test_loader, device)
     
-
-    for epoch in range(start_epoch, start_epoch + config["epochs"]):
+    current_batch, loss = 0, 0
+    for epoch in range(start_epoch, start_epoch + epochs):
         model.train()
         for images, captions_list in tqdm.tqdm(train_loader, desc=f"Training Epoch {epoch+1}/{epochs}, Loss: {loss:.4f}"):
             
@@ -689,7 +691,6 @@ def train_model(config, train_loader, test_loader, device):
             # Move data to the primary device
             images = images.to(device)
             captions = captions_list
-            #print(captions)
 
             # Tokenize text
             text_tokens = tokenizer(captions)
@@ -703,79 +704,81 @@ def train_model(config, train_loader, test_loader, device):
             image_embeds = image_embeds / image_embeds.norm(dim=-1, keepdim=True)
             text_embeds  = text_embeds  / text_embeds.norm(dim=-1, keepdim=True)
 
-            if config["loss_type"] == "anchor-roberta":
-                encodings = roberta.encode(list(captions),convert_to_tensor=True,show_progress_bar = False).to(device)
-                feat_roberta = encodings / encodings.norm(dim=-1, keepdim=True) #torch.nn.functional.normalize(encodings,dim=-1)
-                roberta_similarity= torch.matmul(feat_roberta, feat_roberta.permute(1,0))
-                roberta_similarity = roberta_similarity / 0.1
-                roberta_similarity = F.softmax(roberta_similarity,dim=-1)
-            
             # Compute loss based on the experiment type
+            
+            # EXP 1 AND EXP 2
             if config["loss_type"] == "anchor":
-                loss = contrastive_loss(image_embeds, text_embeds, temperature=0.1)#contrastive_temperature_learnable)
-            elif config["loss_type"] == "anchor-roberta":
-                loss = contrastive_loss_roberta(image_embeds, text_embeds, roberta_similarity, temperature=0.1)#contrastive_temperature_learnable)
-            elif config["loss_type"] == "anchor+lunif":
-            
-                """lunif_img = lunif_loss(image_embeds)
-                lunif_txt = lunif_loss(text_embeds)
-                lunif = (lunif_img + lunif_txt) / 2
-                anchor = contrastive_loss(image_embeds, text_embeds, temperature=contrastive_temperature_learnable)
-                anchor_val = anchor.item()
-                lunif_val = lunif.item()
-                scale = 1.0
-                if lunif_val > 1e-9:
-                    scale = anchor_val / (lunif_val + 1e-9)
-                # Rescale the lunif loss
-                lunif = lunif * scale
-                loss = anchor + lunif"""
+                loss = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
                 
-                lunif = (lunif_loss(image_embeds) + lunif_loss(text_embeds) ) / 2
-                anchor = contrastive_loss(image_embeds, text_embeds, temperature=0.1)
-                
-                loss = config["alpha"] * anchor + config["beta"] * lunif
-            elif config["loss_type"] == "Sparsify_anchor+lunifCentr+lalign":
+            elif config["loss_type"] == "only_lunif_then_anchor+lunif(centroids)+lalign":
             
-                if epoch < config["lunif_n_epochs"]:
+                if epoch < config["only_lunif_epochs"]:
                     lunif_img = lunif_loss(image_embeds)
                     lunif_txt = lunif_loss(text_embeds)
-                    loss = (lunif_img + lunif_txt )/2
+                    loss = (lunif_img + lunif_txt) / 2
                 else:
+                    anchor = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
+
                     centroids = compute_centroids_only(image_embeds, text_embeds)
-                    centroids = F.normalize(centroids,dim=-1)
-                    lunif = lunif_loss(centroids)
-                    anchor = contrastive_loss(image_embeds, text_embeds, temperature=0.1)
-                    lalign_loss = lalign(image_embeds, text_embeds)
-                    alfa = 1 #step * 
-                    loss =  anchor +  alfa * lunif + lalign_loss
+                    centroids = F.normalize(centroids, dim=-1)
+                    lunif_centroids = lunif_loss(centroids)
+                    
+                    lalign = lalign_loss(image_embeds, text_embeds)
+                    
+                    loss =  anchor + lalign + lunif_centroids
             
-            elif config["loss_type"] == "anchor+lunif_decaying":
                 
-                decay_factor = 1 - (current_batch / (len(train_loader))) # or len(train_loader) * epochs
+            elif config["loss_type"] == "only_lunif_then_anchor+lunif+lalign":
+                if epoch < config["only_lunif_epochs"]:
+                    lunif_img = lunif_loss(image_embeds)
+                    lunif_txt = lunif_loss(text_embeds)
+                    loss = (lunif_img + lunif_txt) / 2
+                else:
+                    anchor = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
+                    lalign = lalign_loss(image_embeds, text_embeds)
+                    lunif = (lunif_loss(image_embeds) + lunif_loss(text_embeds)) / 2
+                    loss = anchor + lunif + lalign
                 
-                lunif = (lunif_loss(image_embeds) + lunif_loss(text_embeds) ) / 2
-                anchor = contrastive_loss(image_embeds, text_embeds, temperature=0.1)
                 
-                loss = anchor + decay_factor * lunif
-                
-            elif config["loss_type"] == "anchor+lunif+lalign":
-                lunif = (lunif_loss(image_embeds) + lunif_loss(text_embeds) ) / 2
-                anchor = contrastive_loss(image_embeds, text_embeds, temperature=0.07)
-                val_lalign = lalign(image_embeds, text_embeds)
-                loss = anchor + lunif + val_lalign
-                
+            
+            # NOT USED IN THE EXPERIMENTS
             elif config["loss_type"] == "lunif":
                 loss = (lunif_loss(image_embeds) + lunif_loss(text_embeds)) / 2
             
             elif config["loss_type"] == "anchor+lunif+centroids":
                 lunif = (lunif_loss(image_embeds) + lunif_loss(text_embeds)) / 2
                 centroid_loss = centroid_alignment_loss(image_embeds, text_embeds)
-                anchor_loss = contrastive_loss(image_embeds, text_embeds, temperature=0.07)
-                loss = anchor_loss + lunif + centroid_loss
-                
+                anchor = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
+                loss = anchor + lunif + centroid_loss
+            
+            elif config["loss_type"] == "alternate":
+                if current_batch % 2 == 0:
+                    loss = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
+                else:
+                    loss = (lunif_loss(image_embeds) + lunif_loss(text_embeds)) / 2
+            
+            elif config["loss_type"] == "anchor+lunif":
+                lunif = (lunif_loss(image_embeds) + lunif_loss(text_embeds) ) / 2
+                anchor = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
+                loss = anchor + lunif
+            
+            elif config["loss_type"] == "anchor-roberta":
+                encodings = roberta.encode(list(captions), convert_to_tensor=True, show_progress_bar = False).to(device)
+                feat_roberta = encodings / encodings.norm(dim=-1, keepdim=True) #torch.nn.functional.normalize(encodings,dim=-1)
+                roberta_similarity = torch.matmul(feat_roberta, feat_roberta.permute(1,0))
+                roberta_similarity = roberta_similarity / 0.1
+                roberta_similarity = F.softmax(roberta_similarity, dim=-1)
+                loss = contrastive_loss_roberta(image_embeds, text_embeds, roberta_similarity, temperature=temperature)
+            
+            elif config["loss_type"] == "anchor+lunif_decaying":
+                decay_factor = 1 - (current_batch / (len(train_loader))) # or len(train_loader) * epochs
+                lunif = (lunif_loss(image_embeds) + lunif_loss(text_embeds) ) / 2
+                anchor = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
+                loss = anchor + decay_factor * lunif
+            
             elif config["loss_type"] == "lunif_n_batch+frozen(text_embed)":
                 if current_batch <= config["lalign_n_batch"]:
-                    loss = lalign(image_embeds, text_embeds)
+                    loss = lalign_loss(image_embeds, text_embeds)
 
                 elif current_batch <= config["lunif_n_batch"]:
                 #if epoch < config["lunif_n_epochs"]:
@@ -801,18 +804,18 @@ def train_model(config, train_loader, test_loader, device):
                     #loss = align
                 else: # train on anchor loss with frozen text embeddings
                     #text_embeds = text_embeds.detach()
-                    loss = contrastive_loss(image_embeds, text_embeds, temperature=0.1)#+0.1*lalign(image_embeds, text_embeds)
-
+                    loss = contrastive_loss(image_embeds, text_embeds, temperature=temperature)#+0.1*lalign(image_embeds, text_embeds)
             
-            elif config["loss_type"] == "alternate":
-                if current_batch % 2 == 0:
-                    loss = contrastive_loss(image_embeds, text_embeds, temperature=contrastive_temperature_learnable)
-                else:
-                    loss = (lunif_loss(image_embeds) + lunif_loss(text_embeds)) / 2
-                    
-            wandb.log({"train_loss": loss.item(),
-                       "contrastive_temperature_learnable": contrastive_temperature_learnable.item(),
-                       "decaying_factor": decay_factor})
+            
+            
+            # Track useful metrics
+            if config["temperature_learnable"]:
+                wandb.log({"train_loss": loss.item(),
+                           "contrastive_temperature_learnable": temperature.item(),
+                           "decaying_factor": decay_factor})
+            else:
+                wandb.log({"train_loss": loss.item(),
+                           "decaying_factor": decay_factor})
 
             # Backprop
             optimizer.zero_grad()
@@ -822,11 +825,9 @@ def train_model(config, train_loader, test_loader, device):
         
         if config["evaluate_and_visualize_every_epoch"] == True:
             evaluate_model(model, test_loader, device)
-            #if current_batch % 50 == 0:
-            #    evaluate_model(model, test_loader, device)
             
         if (epoch+1) % config["save_checkpoint_every_n_epochs"]  == 0:
-            torch.save(model.state_dict(), f"models/model_" + config["run_name"] + f"_epoch_{epoch+1}.pt")
+            torch.save(model.state_dict(), f"models/{config["run_name"]}_epoch_{epoch+1}.pt")
             print(f"Model saved at epoch {epoch+1}")
         
                 
@@ -846,6 +847,7 @@ def dataset_loader(config):
     test_image_dir = './data/coco/images/val2017/'                          # Path to val2017 images
     test_annotation_file = './data/coco/annotations/captions_val2017.json'  # Path to val2017 captions
     
+    # Fixed mean and std for the dataset
     mean = [0.48145466, 0.4578275, 0.40821073]
     std = [0.26862954, 0.26130258, 0.27577711]
     
@@ -856,6 +858,7 @@ def dataset_loader(config):
         transforms.ToTensor(),
         transforms.Normalize(mean, std)
     ])
+    
     test_transform = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
@@ -928,7 +931,7 @@ def set_seed(seed: int):
 def main(config):
 
     # Initialize your W&B run
-    wandb.init(project="clip", config=config, name=config["run_name"])
+    wandb.init(project=config["project_name"], config=config, name=config["run_name"])
     
     # Set the seed for reproducibility
     set_seed(config["seed"])
@@ -956,7 +959,7 @@ def main(config):
     print("Evaluation complete.\n")
     
     # Save the model and upload it to W&B
-    torch.save(model.state_dict(), config["run_name"] + ".pt")
+    torch.save(model.state_dict(), "models/" + config["run_name"] + ".pt")
     wandb.save(config["run_name"] + ".pt")    
     
     wandb.finish()
@@ -964,35 +967,7 @@ def main(config):
 
 # In[ ]:
 
-
 config = {
-    #"run_name": "RN50_SparsifyNewLoss_Giordano", #"run_name": "{}".format(datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")),  # A readable name for this run
-    'run_name': "RN50sparsify+align+lunif",
-    "device_id": 1,      # GPU id
-    "seed": 42,     # Random seed
-    
-    "learning_rate": 1e-4,
-    "batch_size": 256,
-    "epochs": 50, # TODO: 100
-    "model": "RN50",
-    
-    "temperature": 0.1,
-    
-    "loss_type": "Sparsify_anchor+lunifCentr+lalign",
-    "lalign_n_batch": 1,
-    "lunif_n_batch": 150,
-    "lunif_n_epochs":  1,
-    
-    
-    "save_checkpoint_every_n_epochs": 10,
-    "evaluate_and_visualize_every_epoch": True,
-    
-    "alpha": 0,
-    "beta": 0,
-    
-    "num_train_samples":            -1,            # -1 for all TODO: -1
-    "num_test_samples":             512,            # -1 for all TODO: -1
-    
     #"resume_checkpoint": "models/model_RN50_anchor+lunif_2025-01-06-23-02-32_epoch_20.pt",
     #"resume_epoch": 20,
     #"run_id": "kx8s0k7i",
@@ -1008,14 +983,12 @@ if __name__ == "__main__":
     
     with open(args.config, 'r') as file:
         config = yaml.safe_load(file)
-    
-    # Print the loaded configuration
-    print("Loaded Configuration:")
-    for key, value in config.items():
-        print(f"{key}: {value}")
 
     # Set the device id
     config["device_id"] = args.device
+    
+    # Convert learning rate to float
+    config["learning_rate"] = float(config["learning_rate"])
 
     # Start the experiment
     main(config)

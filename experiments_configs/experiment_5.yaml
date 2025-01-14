@@ -4,7 +4,7 @@
 
 # Identifiers
 project_name: "Sparsify_experiments"
-run_name: "Experiment 2 - BASELINE_TEMP_FIXED"
+run_name: "Experiment 1 - BASELINE_TEMP_LEARNABLE"
 
 # Never change parameters
 seed: 42
@@ -21,7 +21,7 @@ epochs: 100
 loss_type: "anchor"
 only_lunif_epochs: 0
 anchor_temperature: 0.1
-anchor_temperature_learnable: false
+anchor_temperature_learnable: true
 
 # Evaluation and checkpointing
 evaluate_and_visualize_every_epoch: true

@@ -1,0 +1,5 @@
+project_name: "Sparsify_experiments"
+seed: 42
+learning_rate: 1e-4
+model: "RN50"
+num_test_samples: 512
