@@ -203,6 +203,8 @@ def uniformity10( z1):
     part2 = torch.trace(covariance - 2.0/math.sqrt(D)*covariance2)
     wasserstein_loss = torch.sqrt(part1+1+part2)
     return wasserstein_loss
+
+"""
 # Example usage
 
 bs, d = 256, 512
@@ -224,3 +226,4 @@ print(uniformity2)
 print(uniformity3)
 print(uniformity4)
 print(uniformity_real)
+"""

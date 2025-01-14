@@ -1,9 +1,3 @@
-program: sparsify_clip_temperature_learnable.py
-method: bayes  # Choose optimization strategy; options: grid, random, bayes
-metric:
-  name: forward_r10
-  goal: maximize
-
 parameters:
   seed:
     values: [42]  # Test different seeds for reproducibility
@@ -39,8 +33,3 @@ parameters:
     distribution: uniform
     min: 0.0
     max: 1.0
-
-command:
-  - ${env}
-  - ${interpreter}
-  - ${program}

@@ -22,6 +22,12 @@ import datetime
 import open_clip
 import math
 import umap
+import signal
+import threading
+from uniformity import torch_uniformity1,torch_uniformity_equivalent,uniformity10
+from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.amp.grad_scaler import GradScaler
+
 
 
 # In[2]:
@@ -58,6 +64,28 @@ def lunif_loss(x, t=2):
     # Apply the uniformity loss formula
     return sq_pdist.mul(-t).exp().mean().log()
 
+def sparsify_loss(x):
+    # compute pairwise cosine similarity
+    cos_sim = x @ x.T
+
+    #matrix with 1 on the main diagonal and -1 elsewhere
+    eye = torch.eye(cos_sim.size(0), device=cos_sim.device)
+    eye[eye == 0] = -1
+
+
+    # mse between cosine similarity and eye matrix
+    return F.mse_loss(cos_sim, eye)
+
+def random_alignment_loss(x, y):
+    alpha = 2
+    # randomply shuffle the y embeddings
+    idx = torch.randperm(y.size(0))
+    y = y[idx]
+
+    return (x - y).norm(dim=1).pow(alpha).mean()
+
+def lalign(x, y, alpha=2):
+    return (x - y).norm(dim=1).pow(alpha).mean()
 
 # In[3]:
 
@@ -333,6 +361,27 @@ def uniformity(features_modality1: torch.Tensor, features_modality2: torch.Tenso
     wasserstein_distance = math.sqrt(part1 + 1 + part2)
     return -wasserstein_distance 
 
+def centroid_alignment_loss(img_embeds: torch.Tensor, txt_embeds: torch.Tensor, p=2) -> torch.Tensor:
+    """
+    Compute the distance between the mean image embedding and the mean text embedding.
+
+    Args:
+        img_embeds (torch.Tensor): Image embeddings of shape (batch_size, embed_dim).
+        txt_embeds (torch.Tensor): Text embeddings of shape (batch_size, embed_dim).
+        p (int): Norm order (2 for Euclidean / L2 norm).
+
+    Returns:
+        torch.Tensor: A scalar tensor representing the centroid alignment penalty.
+    """
+    # Compute centroids along the batch dimension
+    centroid_img = img_embeds.mean(dim=0)  # shape (embed_dim,)
+    centroid_txt = txt_embeds.mean(dim=0)  # shape (embed_dim,)
+
+    # Compute the L2 distance (default) between the centroids
+    dist = torch.norm(centroid_img - centroid_txt, p=p)
+    return dist
+
+
 def mean_distance_of_true_pairs(features_modality1: torch.Tensor, features_modality2: torch.Tensor) -> float:
     """
     Compute the mean cosine similarity of true pairs between two modalities.
@@ -396,29 +445,32 @@ def evaluate_model(model: torch.nn.Module, test_loader: DataLoader, device: torc
             # Tokenize captions
             text_tokens = tokenizer(captions_list)
             text_tokens = text_tokens.to(device)
+        
+            with torch.amp.autocast(device_type='cuda'):
 
-            # Extract embeddings using the .module references in DataParallel
-            image_embeds = model.module.encode_image(images)
-            text_embeds = model.module.encode_text(text_tokens)
-            
-            # Normalize embeddings
-            image_embeds = F.normalize(image_embeds, dim=-1)
-            text_embeds  = F.normalize(text_embeds, dim=-1)
+                
+                # Extract embeddings using the .module references in DataParallel
+                image_embeds = model.module.encode_image(images)
+                text_embeds = model.module.encode_text(text_tokens)
+                
+                # Normalize embeddings
+                image_embeds = F.normalize(image_embeds, dim=-1)
+                text_embeds  = F.normalize(text_embeds, dim=-1)
 
-            # Move embeddings to CPU for later concatenation
-            image_embeds = image_embeds.cpu()
-            text_embeds = text_embeds.cpu()
+                # Move embeddings to CPU for later concatenation
+                image_embeds = image_embeds.cpu()
+                text_embeds = text_embeds.cpu()
 
-            # Store embeddings
-            all_image_embeds.append(image_embeds)
-            all_text_embeds.append(text_embeds)
+                # Store embeddings
+                all_image_embeds.append(image_embeds)
+                all_text_embeds.append(text_embeds)
 
-            # Assign unique IDs
-            bs = images.size(0)
-            sample_ids = list(range(current_index, current_index + bs))
-            ids_img.extend(sample_ids)
-            ids_txt.extend(sample_ids)
-            current_index += bs
+                # Assign unique IDs
+                bs = images.size(0)
+                sample_ids = list(range(current_index, current_index + bs))
+                ids_img.extend(sample_ids)
+                ids_txt.extend(sample_ids)
+                current_index += bs
 
     # Concatenate all embeddings
     all_image_embeds = torch.cat(all_image_embeds, dim=0)  # Shape: [N, D]
@@ -431,12 +483,19 @@ def evaluate_model(model: torch.nn.Module, test_loader: DataLoader, device: torc
                                 method='umap', 
                                 title="CLIP Embeddings Visualization",
                                 save_path="embeddings_plot_umap.png")"""
-    visualize_embeddings(all_text_embeds, 
+    """visualize_embeddings(all_text_embeds, 
                                 all_image_embeds, 
                                 sample_size=500, 
                                 method='tsne',
                                 title="CLIP Embeddings Visualization",
-                                save_path="embeddings_plot_tsne.png")
+                                save_path="embeddings_plot_tsne.png")"""
+    
+    """visualize_embeddings(all_text_embeds, 
+                                all_image_embeds, 
+                                sample_size=500, 
+                                method='pca',
+                                title="CLIP Embeddings Visualization",
+                                save_path="embeddings_plot_pca.png")"""
 
     # should be already normalized
     # Normalize embeddings for more stable retrieval and metric computations
@@ -452,20 +511,20 @@ def evaluate_model(model: torch.nn.Module, test_loader: DataLoader, device: torc
 
     # Compute additional metrics
     gap = compute_gap(all_image_embeds, all_text_embeds)
-    mean_ang_image = compute_mean_angular_value_of_a_modality(all_image_embeds)
-    mean_ang_text = compute_mean_angular_value_of_a_modality(all_text_embeds)
-    uniformity_metric = uniformity(all_image_embeds, all_text_embeds)
-    mean_cos_true_pairs = mean_distance_of_true_pairs(all_image_embeds, all_text_embeds)
+    #mean_ang_image = compute_mean_angular_value_of_a_modality(all_image_embeds)
+    #mean_ang_text = compute_mean_angular_value_of_a_modality(all_text_embeds)
+    #uniformity_metric = uniformity(all_image_embeds, all_text_embeds)
+    #mean_cos_true_pairs = mean_distance_of_true_pairs(all_image_embeds, all_text_embeds)
 
     # Combine all metrics into final_log
     final_log = {
         **log_forward,
         **log_backward,
         'gap': round(gap, 4),
-        'mean_angular_value_image': round(mean_ang_image, 4), # round to 4 decimal places
-        'mean_angular_value_text': round(mean_ang_text, 4),
-        'uniformity': round(uniformity_metric, 4),
-        'mean_cosine_similarity_true_pairs': round(mean_cos_true_pairs, 4)
+        #'mean_angular_value_image': round(mean_ang_image, 4), # round to 4 decimal places
+        #'mean_angular_value_text': round(mean_ang_text, 4),
+        #'uniformity': round(uniformity_metric, 4),
+        #'mean_cosine_similarity_true_pairs': round(mean_cos_true_pairs, 4)
     }
 
     print("Evaluation Results:", final_log)
@@ -473,6 +532,8 @@ def evaluate_model(model: torch.nn.Module, test_loader: DataLoader, device: torc
     
     wandb.log(final_log)
 
+    
+    model.train()
     return final_log
 
 
@@ -489,6 +550,8 @@ def train_model(config, train_loader, test_loader, device):
     )
     
     tokenizer = open_clip.get_tokenizer(config["model"])
+    
+    scaler = GradScaler()
 
     # Put the model into training mode
     model.train()
@@ -504,80 +567,157 @@ def train_model(config, train_loader, test_loader, device):
 
     # Move the model to multiple GPUs
     model = model.to(device)
-    model = torch.nn.DataParallel(model, device_ids=[0, 1, 2, 3])  # Use 4 GPUs
+    model = torch.nn.DataParallel(model)
     
     contrastive_temperature_learnable = torch.nn.Parameter(torch.tensor(temperature))
+    
+    # Load checkpoint if resuming
+    if "resume_checkpoint" in config:
+        print(f"Resuming training from {config['resume_checkpoint']} at epoch {config['resume_epoch']}")
+        checkpoint = torch.load(config["resume_checkpoint"])
+        model.load_state_dict(checkpoint)
+        start_epoch = config["resume_epoch"]
+    else:
+        start_epoch = 0
 
     optimizer = optim.AdamW(list(model.parameters())+[contrastive_temperature_learnable], lr=lr)
 
     current_batch = 0
     loss = 0
 
-    for epoch in range(epochs):
+    for epoch in range(start_epoch, start_epoch + config["epochs"]):
+        model.train()
         for images, captions_list in tqdm.tqdm(train_loader, desc=f"Training Epoch {epoch+1}/{epochs}, Loss: {loss:.4f}"):
             
+            
             current_batch += 1
+            decay_factor = 0
+            
+            # decay factor resets after each epoch
+            #decay_factor = 1 - (current_batch / (len(train_loader) * epochs))
+            
+            decay_factor = 1 - (epoch / epochs)
             
             # Move data to the primary device
             images = images.to(device)
             captions = captions_list
+            #print(captions)
 
             # Tokenize text
             text_tokens = tokenizer(captions)
             text_tokens = text_tokens.to(device)
+            
+            # Use autocast for mixed precision training
+            optimizer.zero_grad()
+            
+            with torch.amp.autocast(device_type='cuda'):
 
-            # Encode image and text
-            image_embeds = model.module.encode_image(images)  # Use .module for methods inside DataParallel
-            text_embeds = model.module.encode_text(text_tokens)
-            
-            # Normalize embeddings
-            image_embeds = F.normalize(image_embeds, dim=-1)
-            text_embeds  = F.normalize(text_embeds, dim=-1)
-            
-            # Compute loss based on the experiment type
-            if config["loss_type"] == "anchor":
-                loss = contrastive_loss(image_embeds, text_embeds, temperature=contrastive_temperature_learnable)
-            elif config["loss_type"] == "anchor+lunif":
-            
-                """lunif_img = lunif_loss(image_embeds)
-                lunif_txt = lunif_loss(text_embeds)
-                lunif = (lunif_img + lunif_txt) / 2
-                anchor = contrastive_loss(image_embeds, text_embeds, temperature=contrastive_temperature_learnable)
-                anchor_val = anchor.item()
-                lunif_val = lunif.item()
-                scale = 1.0
-                if lunif_val > 1e-9:
-                    scale = anchor_val / (lunif_val + 1e-9)
-                # Rescale the lunif loss
-                lunif = lunif * scale
-                loss = anchor + lunif"""
+                # Encode image and text
+                image_embeds = model.module.encode_image(images)  # Use .module for methods inside DataParallel
+                text_embeds = model.module.encode_text(text_tokens)
                 
-                loss = contrastive_loss(image_embeds, text_embeds, temperature=contrastive_temperature_learnable) + (lunif_loss(image_embeds) + lunif_loss(text_embeds)) / 2
+                # Normalize embeddings
+                image_embeds = F.normalize(image_embeds, dim=-1)
+                text_embeds  = F.normalize(text_embeds, dim=-1)
                 
-            
-            elif config["loss_type"] == "lunif":
-                loss = (lunif_loss(image_embeds) + lunif_loss(text_embeds)) / 2
+                # Compute loss based on the experiment type
+                if config["loss_type"] == "anchor":
+                    loss = contrastive_loss(image_embeds, text_embeds, temperature=config["temperature"])
+                elif config["loss_type"] == "anchor+lunif":
                 
-            elif config["loss_type"] == "lunif_n_iters+frozen(text_embed)":
-                if current_batch <= config["lunif_n_iters"]:
-                    lunif_img = lunif_loss(image_embeds)
+                    """lunif_img = lunif_loss(image_embeds)
                     lunif_txt = lunif_loss(text_embeds)
                     lunif = (lunif_img + lunif_txt) / 2
-                    loss = lunif
-                else: # train on anchor loss with frozen text embeddings
-                    text_embeds = text_embeds.detach()
-                    loss = contrastive_loss(image_embeds, text_embeds, temperature=contrastive_temperature_learnable)
+                    anchor = contrastive_loss(image_embeds, text_embeds, temperature=contrastive_temperature_learnable)
+                    anchor_val = anchor.item()
+                    lunif_val = lunif.item()
+                    scale = 1.0
+                    if lunif_val > 1e-9:
+                        scale = anchor_val / (lunif_val + 1e-9)
+                    # Rescale the lunif loss
+                    lunif = lunif * scale
+                    loss = anchor + lunif"""
                     
-            wandb.log({"train_loss": loss.item()})
-            wandb.log({"contrastive_temperature_learnable": contrastive_temperature_learnable.item()})
+                    lunif = (lunif_loss(image_embeds) + lunif_loss(text_embeds) ) / 2
+                    anchor = contrastive_loss(image_embeds, text_embeds, temperature=config["temperature"])
+                    
+                    loss = config["alpha"] * anchor + config["beta"] * lunif
+                
+                elif config["loss_type"] == "anchor+lunif_decaying":
+                                        
+                    lunif = (lunif_loss(image_embeds) + lunif_loss(text_embeds) ) / 2
+                    anchor = contrastive_loss(image_embeds, text_embeds, temperature=config["temperature"])
+                    
+                    loss = anchor + decay_factor * lunif
+                    
+                elif config["loss_type"] == "anchor+lunif+lalign":
+                    lunif = (lunif_loss(image_embeds) + lunif_loss(text_embeds) ) / 2
+                    anchor = contrastive_loss(image_embeds, text_embeds, temperature=config["temperature"])
+                    val_lalign = lalign(image_embeds, text_embeds)
+                    loss = anchor + lunif + val_lalign
+                    
+                elif config["loss_type"] == "lunif":
+                    loss = (lunif_loss(image_embeds) + lunif_loss(text_embeds)) / 2
+                
+                elif config["loss_type"] == "anchor+lunif+centroids":
+                    lunif = (lunif_loss(image_embeds) + lunif_loss(text_embeds)) / 2
+                    centroid_loss = centroid_alignment_loss(image_embeds, text_embeds)
+                    anchor_loss = contrastive_loss(image_embeds, text_embeds, temperature=config["temperature"])
+                    loss = anchor_loss + lunif + centroid_loss
+                    
+                elif config["loss_type"] == "lunif_n_batch+frozen(text_embed)":
+                    if current_batch <= config["lalign_n_batch"]:
+                        loss = lalign(image_embeds, text_embeds)
+
+                    elif current_batch <= config["lunif_n_batch"]:
+                    #if epoch < config["lunif_n_epochs"]:
+                        #lunif_img = lunif_loss(image_embeds)
+                        #lunif_img = sparsify_loss(image_embeds)
+                        #lunif_txt = lunif_loss(text_embeds)
+                        #lunif_txt = sparsify_loss(text_embeds)
+
+                        lunif_img = uniformity10(image_embeds.cuda())
+                        lunif_txt = uniformity10(text_embeds.cuda())
+                        lunif_combined = uniformity10(torch.cat([image_embeds, text_embeds], dim=0).cuda())
+                        #lunif_combined = lunif_loss(torch.cat([image_embeds, text_embeds], dim=0))
+                        #lunif_combined = sparsify_loss(torch.cat([image_embeds, text_embeds], dim=0))
+                        #if current_batch<=100:
+                        #    loss = lalign(image_embeds, text_embeds)
+                        #else:
+                        #    loss = lunif_img + lunif_txt
+
+                        #r_align = random_alignment_loss(image_embeds, text_embeds)
+                        #align = lalign(image_embeds, text_embeds)
+                        loss = (lunif_img + lunif_txt + lunif_combined)/3
+                        #loss = lunif + r_align
+                        #loss = align
+                    else: # train on anchor loss with frozen text embeddings
+                        #text_embeds = text_embeds.detach()
+                        loss = contrastive_loss(image_embeds, text_embeds, temperature=0.1)#contrastive_temperature_learnable)
+                
+                elif config["loss_type"] == "alternate":
+                    if current_batch % 2 == 0:
+                        loss = contrastive_loss(image_embeds, text_embeds, temperature=contrastive_temperature_learnable)
+                    else:
+                        loss = (lunif_loss(image_embeds) + lunif_loss(text_embeds)) / 2
+                        
+                wandb.log({"train_loss": loss.item(),
+                           "contrastive_temperature_learnable": contrastive_temperature_learnable.item(),
+                           "decaying_factor": decay_factor})
 
             # Backprop
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            
+        
+        current_batch = 0
         
         if config["evaluate_and_visualize_every_epoch"] == True:
             evaluate_model(model, test_loader, device)
+            #if current_batch % 200 == 0:
+            #    evaluate_model(model, test_loader, device)
+            
             
         if (epoch+1) % config["save_checkpoint_every_n_epochs"]  == 0:
             torch.save(model.state_dict(), f"models/model_" + config["run_name"] + f"_epoch_{epoch+1}.pt")
@@ -605,7 +745,7 @@ def dataset_loader(config):
     
     # Define the transform to be applied to the images
     transform = transforms.Compose([
-        transforms.Resize((224, 224)),  # Resize the image to the model's required input size
+        transforms.RandomResizedCrop((224, 224)),  # Resize the image to the model's required input size
         transforms.ToTensor(),
         transforms.Normalize(mean, std)
     ])
@@ -651,8 +791,8 @@ def dataset_loader(config):
 
     # Create DataLoader
     batch_size = config["batch_size"]
-    train_loader = DataLoader(train_coco, batch_size=batch_size, shuffle=True , drop_last=True, collate_fn=collate_fn, num_workers=12)
-    test_loader  = DataLoader(test_coco , batch_size=batch_size, shuffle=False, drop_last=True, collate_fn=collate_fn, num_workers=12)
+    train_loader = DataLoader(train_coco, batch_size=batch_size, shuffle=True , drop_last=True, collate_fn=collate_fn, num_workers=8)
+    test_loader  = DataLoader(test_coco , batch_size=batch_size, shuffle=False, drop_last=True, collate_fn=collate_fn, num_workers=8)
     
     return train_loader, test_loader
 
@@ -674,14 +814,19 @@ def set_seed(seed: int):
 
 
 def main(config):
-    # Set the seed for reproducibility
-    set_seed(config["seed"])
+    
+    #wandb.init() # TODO: COMMENT TO NOT USE SWEEP
+    #config = wandb.config # TODO: COMMENT TO NOT USE SWEEP
+    
     
     # Finish any existing W&B runs before starting a new one
     wandb.finish()
 
     # Initialize your W&B run
-    wandb.init(project="sparsify-clip", config=config, name=config["run_name"])
+    wandb.init(project="sparsify-clip", config=config, name=config["run_name"]) # TODO: UNCOMMENT TO NOT USE SWEEP
+    
+    # Set the seed for reproducibility
+    set_seed(config["seed"])
     
     # Print the config
     print("Config:", config)
@@ -706,8 +851,8 @@ def main(config):
     print("Evaluation complete.\n")
     
     # Save the model and upload it to W&B
-    torch.save(model.state_dict(), config["run_name"] + ".pt")
-    wandb.save(config["run_name"] + ".pt")    
+    #torch.save(model.state_dict(), config["run_name"] + ".pt")
+    #wandb.save(config["run_name"] + ".pt")    
     
     wandb.finish()
 
@@ -716,8 +861,9 @@ def main(config):
 
 
 config = {
-    "run_name": "{}".format(datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")),  # A readable name for this run
-    "device_id": 0,      # GPU id
+    #"run_name": "RN50_SparsifyNewLoss_Giordano", #"run_name": "{}".format(datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")),  # A readable name for this run
+    'run_name': "RS50_combined_Emanuele",
+    "device_id": 3,      # GPU id
     "seed": 42,     # Random seed
     
     "learning_rate": 1e-4,
@@ -727,15 +873,25 @@ config = {
     
     "temperature": 0.07,
     
-    "loss_type": "MANUAL",   # anchor, anchor+lunif
-    "lunif_n_iters": 15,
+    "loss_type": "anchor", # "anchor+lunif" "anchor" "lunif" "anchor+lunif_decaying" "anchor+lunif+lalign" "lunif_n_batch+frozen(text_embed)" "alternate"
+    "lalign_n_batch": 0,
+    "lunif_n_batch": 150,
+    "lunif_n_epochs":  5,
     
     
-    "save_checkpoint_every_n_epochs": 10,
+    "save_checkpoint_every_n_epochs": 1000,
     "evaluate_and_visualize_every_epoch": True,
     
-    "num_train_samples":            -1,            # -1 for all TODO: -1
-    "num_test_samples":             -1,            # -1 for all TODO: -1
+    "alpha": 0,
+    "beta": 0,
+    
+    "num_train_samples":            15000,            # -1 for all TODO: -1
+    "num_test_samples":             2000,            # -1 for all TODO: -1
+    
+    #"resume_checkpoint": "models/model_RN50_anchor+lunif_2025-01-06-23-02-32_epoch_20.pt",
+    #"resume_epoch": 20,
+    #"run_id": "kx8s0k7i",
+    #"resume": "must",
 }
 
 if __name__ == "__main__":
@@ -748,14 +904,19 @@ if __name__ == "__main__":
     
     
     # Anchor + Lunif
-    config["loss_type"] = "anchor+lunif"
-    config["run_name"] = config["model"] + "_" + config["loss_type"] + "_" + config["run_name"] 
-    print("\nTraining", config["loss_type"], "model")
-    main(config)
+    #config["loss_type"] = "lunif_n_batch+frozen(text_embed)" #"lunif_n_batch+frozen(text_embed)" #"anchor+lunif"
+    #config["run_name"] = config["model"] + "_" + config["loss_type"] + "_" + config["run_name"] 
+    #print("\nTraining", config["loss_type"], "model")
+    #main(config)
     
     
-    # Lunif(50itr)+frozen(text_embed)
-    #config["loss_type"] = "lunif_n_iters+frozen(text_embed)"
+    # Lunif_n_iters+frozen(text_embed)
+    #config["loss_type"] = "alternate"
     #config["run_name"] = config["model"] + "_" + config["loss_type"] + "_" + config["run_name"] 
     #print("\nTraining lunif_n_iters+frozen(text_embed) model")
     #main(config)
+    
+    # Set everything in the config dictionary
+    print("\nTraining", config["loss_type"], "model")
+    config["run_name"] = config["model"] + "_" + config["loss_type"] + "_" + str(config["epochs"]) + "_" + str(config["num_train_samples"]) + "/" + str(config["num_test_samples"])
+    main(config)
