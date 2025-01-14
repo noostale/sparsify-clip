@@ -29,9 +29,14 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from sentence_transformers import SentenceTransformer, util
 from torch.optim.lr_scheduler import LambdaLR
 from torch.optim import Optimizer
+import argparse
+import yaml
+
+# In[2]:
+
 
 def get_cosine_schedule_with_warmup(
-    optimizer: Optimizer, num_warmup_steps: int, num_training_steps: int, num_cycles: float = 0.5, last_epoch: int = -1
+    optimizer: Optimizer, num_warmup_steps: int, num_training_steps: int, num_cycles: float = 0.5, last_epoch: int = -1, steps_sparsify: int = 462
 ):
     """
     Create a schedule with a learning rate that decreases following the values of the cosine function between the
@@ -56,13 +61,14 @@ def get_cosine_schedule_with_warmup(
     """
 
     def lr_lambda(current_step):
-        if current_step < num_warmup_steps:
+        if current_step < steps_sparsify:
+            return 1.0
+        elif current_step < num_warmup_steps:
             return float(current_step) / float(max(1, num_warmup_steps))
         progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
         return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress)))
 
     return LambdaLR(optimizer, lr_lambda, last_epoch)
-
 
 
 def contrastive_loss(image_embeds, text_embeds, temperature=0.07):
@@ -287,6 +293,29 @@ def compute_centroids(text_embeddings, visual_embeddings):
     centroid_norms = torch.norm(centroids, dim=-1)
 
     return centroid_norms, centroids
+
+def compute_centroids_only(text_embeddings, visual_embeddings):
+    """
+    Computes the centroid for each pair of samples between text embeddings and visual embeddings
+    by calculating the mean of the corresponding feature vectors across the two modalities.
+
+    Parameters:
+    - text_embeddings (torch.Tensor): Tensor of shape (batch_size1, feature_dim) representing text embeddings.
+    - visual_embeddings (torch.Tensor): Tensor of shape (batch_size2, feature_dim) representing visual embeddings.
+
+    Returns:
+    - torch.Tensor: Tensor of shape (batch_size1, batch_size2, feature_dim) representing the centroid for each pair.
+    """
+
+    # Compute centroids by averaging text and visual embeddings
+    # Expand the dimensions to allow pairwise computation
+    #text_expanded = text_embeddings.unsqueeze(1)  # Shape: [batch_size1, 1, feature_dim]
+    #visual_expanded = visual_embeddings.unsqueeze(0)  # Shape: [1, batch_size2, feature_dim]
+
+    # Compute the centroid by averaging the embeddings
+    centroids = (text_embeddings + visual_embeddings) / 2.0
+
+    return  centroids
 
 def compute_metric_ret(score_matrix: torch.Tensor, ids: List[int], ids_txt: List[int], direction: str = 'forward') -> Dict[str, float]:
     """
@@ -553,8 +582,10 @@ def evaluate_model(model: torch.nn.Module, test_loader: DataLoader, device: torc
 
     # should be already normalized
     # Normalize embeddings for more stable retrieval and metric computations
-    all_image_embeds = F.normalize(all_image_embeds, dim=-1)
-    all_text_embeds = F.normalize(all_text_embeds, dim=-1)
+    #all_image_embeds = F.normalize(all_image_embeds, dim=-1)
+    #all_text_embeds = F.normalize(all_text_embeds, dim=-1)
+    all_image_embeds = all_image_embeds / all_image_embeds.norm(dim=-1, keepdim=True)
+    all_text_embeds = all_text_embeds / all_text_embeds.norm(dim=-1, keepdim=True)
 
     # Compute pairwise similarity: [N_text, N_image]
     similarity_matrix = all_text_embeds @ all_image_embeds.t()
@@ -567,7 +598,7 @@ def evaluate_model(model: torch.nn.Module, test_loader: DataLoader, device: torc
     gap = compute_gap(all_image_embeds, all_text_embeds)
     mean_ang_image = compute_mean_angular_value_of_a_modality(all_image_embeds)
     mean_ang_text = compute_mean_angular_value_of_a_modality(all_text_embeds)
-    uniformity_metric = uniformity(all_image_embeds, all_text_embeds)
+    #uniformity_metric = uniformity(all_image_embeds, all_text_embeds)
     mean_cos_true_pairs = mean_distance_of_true_pairs(all_image_embeds, all_text_embeds)
 
     # Combine all metrics into final_log
@@ -577,7 +608,7 @@ def evaluate_model(model: torch.nn.Module, test_loader: DataLoader, device: torc
         'gap': round(gap, 4),
         'mean_angular_value_image': round(mean_ang_image, 4), # round to 4 decimal places
         'mean_angular_value_text': round(mean_ang_text, 4),
-        'uniformity': round(uniformity_metric, 4),
+        #'uniformity': round(uniformity_metric, 4),
         'mean_cosine_similarity_true_pairs': round(mean_cos_true_pairs, 4)
     }
 
@@ -604,7 +635,7 @@ def train_model(config, train_loader, test_loader, device):
     )
     
     tokenizer = open_clip.get_tokenizer(config["model"])
-
+    
     # Put the model into training mode
     model.train()
 
@@ -640,10 +671,13 @@ def train_model(config, train_loader, test_loader, device):
     num_warmup_steps = int(0.20 * t_total)
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps= num_warmup_steps, num_training_steps= t_total)
 
+
     current_batch = 0
     loss = 0
+
     model.eval()
     evaluate_model(model, test_loader, device)
+    
 
     for epoch in range(start_epoch, start_epoch + config["epochs"]):
         model.train()
@@ -666,12 +700,12 @@ def train_model(config, train_loader, test_loader, device):
             text_embeds = model.module.encode_text(text_tokens)
             
             # Normalize embeddings
-            image_embeds = F.normalize(image_embeds, dim=-1)
-            text_embeds  = F.normalize(text_embeds, dim=-1)
+            image_embeds = image_embeds / image_embeds.norm(dim=-1, keepdim=True)
+            text_embeds  = text_embeds  / text_embeds.norm(dim=-1, keepdim=True)
 
             if config["loss_type"] == "anchor-roberta":
                 encodings = roberta.encode(list(captions),convert_to_tensor=True,show_progress_bar = False).to(device)
-                feat_roberta = torch.nn.functional.normalize(encodings,dim=-1)
+                feat_roberta = encodings / encodings.norm(dim=-1, keepdim=True) #torch.nn.functional.normalize(encodings,dim=-1)
                 roberta_similarity= torch.matmul(feat_roberta, feat_roberta.permute(1,0))
                 roberta_similarity = roberta_similarity / 0.1
                 roberta_similarity = F.softmax(roberta_similarity,dim=-1)
@@ -700,6 +734,20 @@ def train_model(config, train_loader, test_loader, device):
                 anchor = contrastive_loss(image_embeds, text_embeds, temperature=0.1)
                 
                 loss = config["alpha"] * anchor + config["beta"] * lunif
+            elif config["loss_type"] == "Sparsify_anchor+lunifCentr+lalign":
+            
+                if epoch < config["lunif_n_epochs"]:
+                    lunif_img = lunif_loss(image_embeds)
+                    lunif_txt = lunif_loss(text_embeds)
+                    loss = (lunif_img + lunif_txt )/2
+                else:
+                    centroids = compute_centroids_only(image_embeds, text_embeds)
+                    centroids = F.normalize(centroids,dim=-1)
+                    lunif = lunif_loss(centroids)
+                    anchor = contrastive_loss(image_embeds, text_embeds, temperature=0.1)
+                    lalign_loss = lalign(image_embeds, text_embeds)
+                    alfa = 1 #step * 
+                    loss =  anchor +  alfa * lunif + lalign_loss
             
             elif config["loss_type"] == "anchor+lunif_decaying":
                 
@@ -731,14 +779,14 @@ def train_model(config, train_loader, test_loader, device):
 
                 elif current_batch <= config["lunif_n_batch"]:
                 #if epoch < config["lunif_n_epochs"]:
-                    #lunif_img = lunif_loss(image_embeds)
+                    lunif_img = lunif_loss(image_embeds)
                     #lunif_img = sparsify_loss(image_embeds)
-                    #lunif_txt = lunif_loss(text_embeds)
+                    lunif_txt = lunif_loss(text_embeds)
                     #lunif_txt = sparsify_loss(text_embeds)
 
-                    lunif_img = uniformity10(image_embeds.cuda())
-                    lunif_txt = uniformity10(text_embeds.cuda())
-                    lunif_combined = uniformity10(torch.cat([image_embeds, text_embeds], dim=0).cuda())
+                    #lunif_img = uniformity10(image_embeds.cuda())
+                    #lunif_txt = uniformity10(text_embeds.cuda())
+                    #lunif_combined = uniformity10(torch.cat([image_embeds, text_embeds], dim=0).cuda())
                     #lunif_combined = lunif_loss(torch.cat([image_embeds, text_embeds], dim=0))
                     #lunif_combined = sparsify_loss(torch.cat([image_embeds, text_embeds], dim=0))
                     #if current_batch<=100:
@@ -748,12 +796,13 @@ def train_model(config, train_loader, test_loader, device):
 
                     #r_align = random_alignment_loss(image_embeds, text_embeds)
                     #align = lalign(image_embeds, text_embeds)
-                    loss = (lunif_img + lunif_txt + lunif_combined)/3
+                    loss = (lunif_img + lunif_txt )/2
                     #loss = lunif + r_align
                     #loss = align
                 else: # train on anchor loss with frozen text embeddings
                     #text_embeds = text_embeds.detach()
-                    loss = contrastive_loss(image_embeds, text_embeds, temperature=0.1)#contrastive_temperature_learnable)
+                    loss = contrastive_loss(image_embeds, text_embeds, temperature=0.1)#+0.1*lalign(image_embeds, text_embeds)
+
             
             elif config["loss_type"] == "alternate":
                 if current_batch % 2 == 0:
@@ -773,7 +822,7 @@ def train_model(config, train_loader, test_loader, device):
         
         if config["evaluate_and_visualize_every_epoch"] == True:
             evaluate_model(model, test_loader, device)
-            #if current_batch % 200 == 0:
+            #if current_batch % 50 == 0:
             #    evaluate_model(model, test_loader, device)
             
         if (epoch+1) % config["save_checkpoint_every_n_epochs"]  == 0:
@@ -877,16 +926,9 @@ def set_seed(seed: int):
 
 
 def main(config):
-    
-    #wandb.init() # TODO: COMMENT TO NOT USE SWEEP
-    #config = wandb.config # TODO: COMMENT TO NOT USE SWEEP
-    
-    
-    # Finish any existing W&B runs before starting a new one
-    wandb.finish()
 
     # Initialize your W&B run
-    wandb.init(project="clip", config=config, name=config["run_name"]) # TODO: UNCOMMENT TO NOT USE SWEEP
+    wandb.init(project="clip", config=config, name=config["run_name"])
     
     # Set the seed for reproducibility
     set_seed(config["seed"])
@@ -925,21 +967,21 @@ def main(config):
 
 config = {
     #"run_name": "RN50_SparsifyNewLoss_Giordano", #"run_name": "{}".format(datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")),  # A readable name for this run
-    'run_name': "RN50_BASELINE",
-    "device_id": 0,      # GPU id
+    'run_name': "RN50sparsify+align+lunif",
+    "device_id": 1,      # GPU id
     "seed": 42,     # Random seed
     
     "learning_rate": 1e-4,
     "batch_size": 256,
-    "epochs": 100, # TODO: 100
+    "epochs": 50, # TODO: 100
     "model": "RN50",
     
-    "temperature": 0.07,
+    "temperature": 0.1,
     
-    "loss_type": "anchor",
-    "lalign_n_batch": 0,
+    "loss_type": "Sparsify_anchor+lunifCentr+lalign",
+    "lalign_n_batch": 1,
     "lunif_n_batch": 150,
-    "lunif_n_epochs":  5,
+    "lunif_n_epochs":  1,
     
     
     "save_checkpoint_every_n_epochs": 10,
@@ -959,26 +1001,21 @@ config = {
 
 if __name__ == "__main__":
     
-    # Baseline
-    #config["loss_type"] = "anchor"
-    #config["run_name"] = config["model"] + "_" + config["loss_type"] + "_" + config["run_name"] 
-    #print("\nTraining Baseline model")
-    #main(config)
+    parser = argparse.ArgumentParser(description="Run the experiment with a config.yaml file.")
+    parser.add_argument("--config", type=str, required=True, help="Path to the config.yaml file")
+    parser.add_argument("--device", type=int, required=True, help="GPU id to use")
+    args = parser.parse_args()
     
+    with open(args.config, 'r') as file:
+        config = yaml.safe_load(file)
     
-    # Anchor + Lunif
-    #config["loss_type"] = "lunif_n_batch+frozen(text_embed)" #"lunif_n_batch+frozen(text_embed)" #"anchor+lunif"
-    #config["run_name"] = config["model"] + "_" + config["loss_type"] + "_" + config["run_name"] 
-    #print("\nTraining", config["loss_type"], "model")
-    #main(config)
-    
-    
-    # Lunif_n_iters+frozen(text_embed)
-    #config["loss_type"] = "alternate"
-    #config["run_name"] = config["model"] + "_" + config["loss_type"] + "_" + config["run_name"] 
-    #print("\nTraining lunif_n_iters+frozen(text_embed) model")
-    #main(config)
-    
-    # Set everything in the config dictionary
-    print("\nTraining", config["loss_type"], "model")
+    # Print the loaded configuration
+    print("Loaded Configuration:")
+    for key, value in config.items():
+        print(f"{key}: {value}")
+
+    # Set the device id
+    config["device_id"] = args.device
+
+    # Start the experiment
     main(config)

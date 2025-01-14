@@ -1,0 +1,23 @@
+# Identifiers
+project: "Sparsify_experiments"
+run_name: "Experiment_1"
+
+# Fixed parameters
+seed: 42
+learning_rate: 1e-4
+batch_size: 256
+
+
+epochs: 20
+model: "RN50"
+temperature: 0.1
+loss_type: "Sparsify_anchor+lunifCentr+lalign"
+lalign_n_batch: 1
+lunif_n_batch: 150
+lunif_n_epochs: 1
+save_checkpoint_every_n_epochs: 10
+evaluate_and_visualize_every_epoch: true
+alpha: 0
+beta: 0
+num_train_samples: -1
+num_test_samples: 512
