@@ -562,20 +562,19 @@ def evaluate_model(model: torch.nn.Module, test_loader: DataLoader, device: torc
     
     visualize_embeddings(all_text_embeds, 
                                 all_image_embeds, 
-                                sample_size=512, 
+                                sample_size=500, 
                                 method='umap', 
                                 title="CLIP Embeddings Visualization",
                                 save_path="plots/embeddings_plot_umap.png")
     visualize_embeddings(all_text_embeds, 
                                 all_image_embeds, 
-                                sample_size=512, 
+                                sample_size=500, 
                                 method='tsne',
                                 title="CLIP Embeddings Visualization",
                                 save_path="plots/embeddings_plot_tsne.png")
-    
     visualize_embeddings(all_text_embeds, 
                                 all_image_embeds, 
-                                sample_size=512, 
+                                sample_size=500, 
                                 method='pca',
                                 title="CLIP Embeddings Visualization",
                                 save_path="plots/embeddings_plot_pca.png")
@@ -669,7 +668,7 @@ def train_model(config, train_loader, test_loader, device):
         start_epoch = config["resume_epoch"]
 
     # Set up the parameters and optimizer 
-    parameters = list(model.parameters()) + [temperature] if config["temperature_learnable"] else list(model.parameters())
+    parameters = list(model.parameters()) + [temperature] if config["anchor_temperature_learnable"] else list(model.parameters())
     optimizer = optim.AdamW(parameters, lr=lr)
     
     # Set up the learning rate scheduler as 20% warmup
@@ -686,8 +685,7 @@ def train_model(config, train_loader, test_loader, device):
         for images, captions_list in tqdm.tqdm(train_loader, desc=f"Training Epoch {epoch+1}/{epochs}, Loss: {loss:.4f}"):
             
             current_batch += 1
-            decay_factor = 0
-            
+                        
             # Move data to the primary device
             images = images.to(device)
             captions = captions_list
@@ -809,14 +807,12 @@ def train_model(config, train_loader, test_loader, device):
             
             
             # Track useful metrics
-            if config["temperature_learnable"]:
+            if config["anchor_temperature_learnable"]:
                 wandb.log({"train_loss": loss.item(),
-                           "contrastive_temperature_learnable": temperature.item(),
-                           "decaying_factor": decay_factor})
+                           "contrastive_temperature_learnable": temperature.item()})
             else:
-                wandb.log({"train_loss": loss.item(),
-                           "decaying_factor": decay_factor})
-
+                wandb.log({"train_loss": loss.item()})
+            
             # Backprop
             optimizer.zero_grad()
             loss.backward()
@@ -827,10 +823,9 @@ def train_model(config, train_loader, test_loader, device):
             evaluate_model(model, test_loader, device)
             
         if (epoch+1) % config["save_checkpoint_every_n_epochs"]  == 0:
-            torch.save(model.state_dict(), f"models/{config["run_name"]}_epoch_{epoch+1}.pt")
+            torch.save(model.state_dict(), f"models/{config['run_name']}_epoch_{epoch+1}.pt")
             print(f"Model saved at epoch {epoch+1}")
         
-                
     return model
 
 
@@ -905,9 +900,10 @@ def dataset_loader(config):
         return images, sel_captions
 
     # Create DataLoader
-    batch_size = config["batch_size"]
-    train_loader = DataLoader(train_coco, batch_size=batch_size, shuffle=True , drop_last=True, collate_fn=collate_fn, num_workers=8)
-    test_loader  = DataLoader(test_coco , batch_size=batch_size, shuffle=False, drop_last=True, collate_fn=collate_fn, num_workers=8)
+    train_batch_size = config["batch_size"]
+    test_batch_size = config["batch_size"]
+    train_loader = DataLoader(train_coco, batch_size=train_batch_size, shuffle=True , drop_last=True, collate_fn=collate_fn, num_workers=8)
+    test_loader  = DataLoader(test_coco , batch_size=test_batch_size, shuffle=False, drop_last=True, collate_fn=collate_fn, num_workers=8)
     
     return train_loader, test_loader
 
@@ -959,7 +955,7 @@ def main(config):
     print("Evaluation complete.\n")
     
     # Save the model and upload it to W&B
-    torch.save(model.state_dict(), "models/" + config["run_name"] + ".pt")
+    torch.save(model.state_dict(), "models/" + config['run_name'] + ".pt")
     wandb.save(config["run_name"] + ".pt")    
     
     wandb.finish()
@@ -981,6 +977,7 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=int, required=True, help="GPU id to use")
     args = parser.parse_args()
     
+    # Load the config file provided from the command line
     with open(args.config, 'r') as file:
         config = yaml.safe_load(file)
 

@@ -4,12 +4,12 @@
 
 # Identifiers
 project_name: "Sparsify_experiments"
-run_name: "Experiment 2 - BASELINE_TEMP_FIXED"
+run_name: "Experiment 6 - TODO"
 
 # Never change parameters
 seed: 42
 learning_rate: 1e-4
-batch_size: 1024
+batch_size: 256
 model: "RN50"
 num_train_samples: -1
 num_test_samples: 512
@@ -21,8 +21,8 @@ epochs: 100
 loss_type: "anchor"
 only_lunif_epochs: 0
 anchor_temperature: 0.1
-anchor_temperature_learnable: false
+anchor_temperature_learnable: true
 
 # Evaluation and checkpointing
 evaluate_and_visualize_every_epoch: true
-save_checkpoint_every_n_epochs: 10
+save_checkpoint_every_n_epochs: 20
