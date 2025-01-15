@@ -4,7 +4,7 @@
 
 # Identifiers
 project_name: "Sparsify_experiments"
-run_name: "Experiment 5 - TODO"
+run_name: "experiment_5-SPARSIFICATION(1E)+ANCHOR+LALIGN+LUNIF(TEXT)+LUNIF(IMG)"
 
 # Never change parameters
 seed: 42
@@ -18,11 +18,14 @@ num_test_samples: 512
 epochs: 100
 
 # Experiment specific parameters
-loss_type: "anchor"
-only_lunif_epochs: 0
+loss_type: "only_lunif_n_then_anchor+lalign+lunif(text)+lunif(img)"
+only_lunif_epochs: 1
 anchor_temperature: 0.1
 anchor_temperature_learnable: true
 
 # Evaluation and checkpointing
-evaluate_and_visualize_every_epoch: true
 save_checkpoint_every_n_epochs: 20
+resume_checkpoint: False
+
+# fp16
+fp16: True

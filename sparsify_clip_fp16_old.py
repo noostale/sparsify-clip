@@ -16,10 +16,11 @@ from openTSNE import TSNE
 from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
 import numpy as np
-from tqdm import tqdm
+import tqdm
 import random
 import wandb
 import time
+from torch.cuda.amp import autocast, GradScaler
 import open_clip
 import math
 import umap
@@ -61,15 +62,8 @@ def get_cosine_schedule_with_warmup(optimizer: Optimizer, num_warmup_steps: int,
     Return:
         :obj:`torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.
     """
-    
-    # Question: If we use this scheduler, the max value of lr will be the one set in the optimizer, but this means
-    # that lr will be 1e-4 only for a few steps after the warmup period, but in reality we see that if we use a 
-    # constant rate of 1e-4, the model performs good, so why use 1e-4 only for a few steps?
-    # Cosine with restarts?
 
     def lr_lambda(current_step):
-        # If we are using a warmup with a sparsity loss, we only want to apply the cosine schedule after 
-        # the sparsity loss i.e. we want to keep the learning rate constant during the sparsity loss
         if current_step < steps_sparsify and config["only_lunif_epochs"] > 0:
             return 1.0
         elif current_step < num_warmup_steps:
@@ -89,8 +83,8 @@ def contrastive_loss(image_embeds, text_embeds, temperature=0.07):
     """
     
     # Similarity matrix, shape (bs, bs)
-    logits = (image_embeds @ text_embeds.t())# .float()
-    logits = logits / temperature# .float()
+    logits = image_embeds @ text_embeds.t()
+    logits = logits / temperature
 
     # Targets are just the diagonal (i.e. 0->0, 1->1, ...)
     batch_size = image_embeds.size(0)
@@ -220,13 +214,16 @@ def visualize_embeddings(text_embeddings, vision_embeddings,
         reducer = PCA(n_components=3)
         reduced = reducer.fit_transform(all_data)
     elif method.lower() == "tsne":
-        reducer = TSNE(n_components=3, n_jobs=1, n_iter=1000)
+        reducer = TSNE(n_components=3, n_jobs=1)
         reduced = reducer.fit(all_data)
     elif method.lower() == "umap":
         reducer = umap.UMAP(n_components=3, n_jobs=8)
         reduced = reducer.fit_transform(all_data)
     else:
         raise NotImplementedError("Only 'pca', 'tsne', and 'umap' are implemented.")
+
+    
+
 
     # Split back into text and vision
     text_reduced = reduced[: len(text_np)]
@@ -532,7 +529,7 @@ def evaluate_model(model: torch.nn.Module, test_loader: DataLoader, device: torc
 
     # No gradient needed during evaluation
     with torch.no_grad():
-        for images, captions_list in (tqdm(test_loader, desc="Evaluating") if plot_embeddings else test_loader):
+        for images, captions_list in tqdm.tqdm(test_loader, desc="Evaluating"):
             # Move images to device
             images = images.to(device)
 
@@ -593,6 +590,11 @@ def evaluate_model(model: torch.nn.Module, test_loader: DataLoader, device: torc
                                 method='pca',
                                 title="CLIP Embeddings Visualization",
                                 save_path="plots/embeddings_plot_pca.png")
+
+    
+    
+    
+    
 
     # should be already normalized
     # Normalize embeddings for more stable retrieval and metric computations
@@ -693,7 +695,7 @@ def train_model(config, train_loader, test_loader, device):
     
     # Set up learnable temperature if required
     if config["anchor_temperature_learnable"]:
-        temperature = torch.nn.Parameter(torch.tensor(temperature, dtype=torch.float32), requires_grad=True)
+        temperature = torch.nn.Parameter(torch.tensor(temperature))
     
     # Load checkpoint if resuming
     if config["resume_checkpoint"]:
@@ -703,9 +705,7 @@ def train_model(config, train_loader, test_loader, device):
         start_epoch = config["resume_epoch"]
 
     # Set up the parameters and optimizer 
-    parameters = list(model.parameters())
-    if config["anchor_temperature_learnable"]:
-        parameters.append(temperature)
+    parameters = list(model.parameters()) + [temperature] if config["anchor_temperature_learnable"] else list(model.parameters())
     optimizer = optim.AdamW(parameters, lr=lr)
     scaler = torch.GradScaler("cuda") if config["fp16"] else None
     
@@ -715,17 +715,12 @@ def train_model(config, train_loader, test_loader, device):
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=t_total, config=config)
 
     # Make a prior evaluation of the model
-    print("Evaluating model before training...")
-    evaluate_model(model, test_loader, device)
-    
-    # Record start time
-    start_time = time.time()
-    remaining_time_formatted = "00:00:00"
+    #evaluate_model(model, test_loader, device)
     
     current_batch, loss = 0, 0
     for epoch in range(start_epoch, start_epoch + epochs):
         model.train()
-        for images, captions_list in tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}, Loss: {loss:.4f}, ETA: {remaining_time_formatted}"):
+        for images, captions_list in tqdm.tqdm(train_loader, desc=f"Training Epoch {epoch+1}/{epochs}, Loss: {loss:.4f}"):
             
             current_batch += 1
                         
@@ -737,7 +732,9 @@ def train_model(config, train_loader, test_loader, device):
             text_tokens = tokenizer(captions)
             text_tokens = text_tokens.to(device)
             
+            optimizer.zero_grad()
             with torch.autocast(device_type="cuda", enabled=config["fp16"]):
+           
 
                 # Encode image and text
                 image_embeds = model.module.encode_image(images)  # Use .module for methods inside DataParallel
@@ -751,26 +748,10 @@ def train_model(config, train_loader, test_loader, device):
                 
                 # EXP 1 AND EXP 2
                 if config["loss_type"] == "anchor":
-                    loss = contrastive_loss(image_embeds, text_embeds, temperature=temperature) # check temperature.float() for fp16 compatibility
+                    loss = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
                 
-                
-                
-                # EXP 3, 5
-                elif config["loss_type"] == "only_lunif_n_then_anchor+lalign+lunif(text)+lunif(img)":
-                    if epoch < config["only_lunif_epochs"]:
-                        lunif_img = lunif_loss(image_embeds)
-                        lunif_txt = lunif_loss(text_embeds)
-                        loss = (lunif_img + lunif_txt) / 2
-                    else:
-                        anchor = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
-                        lalign = lalign_loss(image_embeds, text_embeds)
-                        lunif = (lunif_loss(image_embeds) + lunif_loss(text_embeds)) / 2
-                        loss = anchor + lunif + lalign
-                
-                
-                
-                # EXP 4, 6
-                elif config["loss_type"] == "only_lunif_n_then_anchor+lalign+lunif(centroids)":
+                # EXP 3, 4
+                elif config["loss_type"] == "only_lunif_then_anchor+lunif(centroids)+lalign":
                 
                     if epoch < config["only_lunif_epochs"]:
                         lunif_img = lunif_loss(image_embeds)
@@ -787,24 +768,30 @@ def train_model(config, train_loader, test_loader, device):
                         
                         loss =  anchor + lalign + lunif_centroids
                 
+                # EXP 5, 6    
+                elif config["loss_type"] == "only_lunif_then_anchor+lunif+lalign":
+                    if epoch < config["only_lunif_epochs"]:
+                        lunif_img = lunif_loss(image_embeds)
+                        lunif_txt = lunif_loss(text_embeds)
+                        loss = (lunif_img + lunif_txt) / 2
+                    else:
+                        anchor = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
+                        lalign = lalign_loss(image_embeds, text_embeds)
+                        lunif = (lunif_loss(image_embeds) + lunif_loss(text_embeds)) / 2
+                        loss = anchor + lunif + lalign
+                    
                 
-                    
-                    
             # Track useful metrics
             if config["anchor_temperature_learnable"]:
                 wandb.log({"train_loss": loss.item(),
-                           "constrantive_temperature_learnable": temperature.item(),
+                           "contrastive_temperature_learnable": temperature.item(),
                            "learning_rate": scheduler.get_last_lr()[0]})
             else:
-                wandb.log({"train_loss": loss.item(),
-                            "learning_rate": scheduler.get_last_lr()[0]})
+                wandb.log({"train_loss": loss.item()})
             
             # Evaluate the model every n batches
-            #if current_batch % 100 == 0:
-            #    evaluate_model(model, test_loader, device, plot_embeddings=False)
-            
-            # Zero gradients
-            optimizer.zero_grad()
+            if current_batch % 10 == 0:
+                evaluate_model(model, test_loader, device, plot_embeddings=False)
             
             # Backprop
             if config["fp16"]:
@@ -814,20 +801,11 @@ def train_model(config, train_loader, test_loader, device):
             else:
                 loss.backward()
                 optimizer.step()
-            
-            # Update learning rate
+  
             scheduler.step()
-            
-            # Calculate elapsed and estimated total time
-            elapsed_time = time.time() - start_time
-            progress = (current_batch + epoch * len(train_loader)) / t_total
-            remaining_time = elapsed_time * (1 - progress) / progress if progress > 0 else 0
-
-            # Format time for display
-            remaining_time_formatted = time.strftime("%H:%M:%S", time.gmtime(remaining_time))
-            
         
-        evaluate_model(model, test_loader, device)
+        if config["evaluate_and_visualize_every_epoch"] == True:
+            evaluate_model(model, test_loader, device)
             
         if (epoch+1) % config["save_checkpoint_every_n_epochs"]  == 0:
             torch.save(model.state_dict(), f"models/{config['run_name']}_epoch_{epoch+1}.pt")
@@ -909,8 +887,8 @@ def dataset_loader(config):
     # Create DataLoader
     train_batch_size = config["batch_size"]
     test_batch_size = config["batch_size"]
-    train_loader = DataLoader(train_coco, batch_size=train_batch_size, shuffle=True , drop_last=True, collate_fn=collate_fn, num_workers=5, pin_memory=True, prefetch_factor=2, persistent_workers=True)
-    test_loader  = DataLoader(test_coco , batch_size=test_batch_size, shuffle=False, drop_last=True, collate_fn=collate_fn, num_workers=8, pin_memory=True, prefetch_factor=2, persistent_workers=True)
+    train_loader = DataLoader(train_coco, batch_size=train_batch_size, shuffle=True , drop_last=True, collate_fn=collate_fn, num_workers=5, pin_memory=True)
+    test_loader  = DataLoader(test_coco , batch_size=test_batch_size, shuffle=False, drop_last=True, collate_fn=collate_fn, num_workers=8)
     
     return train_loader, test_loader
 

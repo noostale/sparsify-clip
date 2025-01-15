@@ -1,4 +1,4 @@
-name: sparsify_clip
+name: sparsify_clip_rapid
 channels:
   - pytorch
   - nvidia

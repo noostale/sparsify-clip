@@ -21,9 +21,11 @@ epochs: 100
 loss_type: "anchor"
 only_lunif_epochs: 0
 anchor_temperature: 0.1
-anchor_temperature_learnable: false
+anchor_temperature_learnable: False
 
 # Evaluation and checkpointing
-evaluate_and_visualize_every_epoch: true
 save_checkpoint_every_n_epochs: 20
 resume_checkpoint: False
+
+# fp16
+fp16: True
