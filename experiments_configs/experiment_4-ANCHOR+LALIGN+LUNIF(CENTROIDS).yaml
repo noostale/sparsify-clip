@@ -13,15 +13,13 @@ batch_size: 256
 model: "RN50"
 num_train_samples: -1
 num_test_samples: 512
-
-# Speed-up test parameters
 epochs: 100
 
 # Experiment specific parameters
 loss_type: "only_lunif_n_then_anchor+lalign+lunif(centroids)"
 only_lunif_epochs: 0
 anchor_temperature: 0.1
-anchor_temperature_learnable: true
+anchor_temperature_learnable: False
 
 # Evaluation and checkpointing
 save_checkpoint_every_n_epochs: 20

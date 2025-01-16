@@ -4,6 +4,7 @@
 # In[1]:
 
 import torch
+import os
 import torch.nn.functional as F
 from torch import optim
 from torch.utils.data import DataLoader
@@ -30,6 +31,7 @@ from torch.optim import Optimizer
 import argparse
 import yaml
 from concurrent.futures import ThreadPoolExecutor
+from PIL import Image
 
 import warnings
 warnings.filterwarnings("ignore", message=".*'force_all_finite' was renamed to 'ensure_all_finite'.*")
@@ -45,7 +47,7 @@ def get_cosine_schedule_with_warmup(optimizer: Optimizer, num_warmup_steps: int,
     initial lr set in the optimizer to 0, after a warmup period during which it increases linearly between 0 and the
     initial lr set in the optimizer.
 
-    Args:
+    Arguments:
         optimizer (:class:`~torch.optim.Optimizer`):
             The optimizer for which to schedule the learning rate.
         num_warmup_steps (:obj:`int`):
@@ -89,8 +91,8 @@ def contrastive_loss(image_embeds, text_embeds, temperature=0.07):
     """
     
     # Similarity matrix, shape (bs, bs)
-    logits = (image_embeds @ text_embeds.t())# .float()
-    logits = logits / temperature# .float()
+    logits = image_embeds @ text_embeds.t()
+    logits = logits / temperature
 
     # Targets are just the diagonal (i.e. 0->0, 1->1, ...)
     batch_size = image_embeds.size(0)
@@ -170,19 +172,13 @@ def visualize_embeddings(text_embeddings, vision_embeddings,
     Visualizes text and vision embeddings in 2D or 3D using PCA, t-SNE, or UMAP.
 
     Args:
-        text_embeddings (torch.Tensor): 
-            Shape [N, D] containing text embeddings.
-        vision_embeddings (torch.Tensor):
-            Shape [N, D] containing vision/image embeddings.
-        sample_size (int): 
-            If the embeddings contain more than 'sample_size' samples, 
+        text_embeddings (torch.Tensor): Shape [N, D] containing text embeddings.
+        vision_embeddings (torch.Tensor): Shape [N, D] containing vision/image embeddings.
+        sample_size (int): If the embeddings contain more than 'sample_size' samples, 
             randomly pick this many for faster plotting. Set -1 to use all.
-        method (str): 
-            "pca", "tsne", or "umap".
-        title (str): 
-            Title for the plot.
-        save_path (str, optional): 
-            If provided, saves the plot to this path instead of showing it.
+        method (str): "pca", "tsne", or "umap".
+        title (str): Title for the plot.
+        save_path (str, optional): If provided, saves the plot to this path instead of showing it.
     """
     # Detach from graph and bring to CPU if the tensors require grad
     text_np = text_embeddings.detach().cpu().numpy()
@@ -202,18 +198,6 @@ def visualize_embeddings(text_embeddings, vision_embeddings,
 
     # Combine for joint dimensionality reduction
     all_data = np.concatenate([text_np, vision_np], axis=0)
-    
-    
-    # SHOULD BE NORMALIZED IN THE EVALUATE FUNCTION
-    
-    #NORMALIZATION
-    #norms = np.linalg.norm(all_data, axis=1, keepdims=True)
-
-    # Avoid division by zero
-    #norms = np.where(norms == 0, 1, norms)
-
-    # Normalize each vector
-    #all_data = all_data / norms
     
     # Apply dimensionality reduction
     if method.lower() == "pca":
@@ -258,17 +242,37 @@ def visualize_embeddings(text_embeddings, vision_embeddings,
     ax.set_zlim(-1.0, 1.0)
     
     
+    
+
+
+    
 
     ax.set_title(title)
     ax.set_xlabel("Component 1")
     ax.set_ylabel("Component 2")
     ax.set_zlabel("Component 3")
     ax.legend()
+    
+    def is_valid_png(image_path):
+        try:
+            with Image.open(image_path) as img:
+                img.verify()  # Verify if the image is intact
+            return True
+        except (SyntaxError, IOError, OSError):
+            return False
 
     if save_path is not None:
         plt.savefig(save_path, dpi=300)
-        wandb.log({method: wandb.Image(save_path)})
         plt.close()
+        
+        if is_valid_png(save_path):
+            wandb.log({method: wandb.Image(save_path)})
+        else:
+            print(f"Invalid PNG file saved at {save_path}")
+        
+        # Remove the saved plot from disk
+        os.remove(save_path)
+                
     else:
         plt.show()
 
@@ -543,10 +547,6 @@ def evaluate_model(model: torch.nn.Module, test_loader: DataLoader, device: torc
             # Extract embeddings using the .module references in DataParallel
             image_embeds = model.module.encode_image(images)
             text_embeds = model.module.encode_text(text_tokens)
-            
-            # Normalize embeddings
-            #image_embeds = F.normalize(image_embeds, dim=-1)
-            #text_embeds  = F.normalize(text_embeds, dim=-1)
 
             # Move embeddings to CPU for later concatenation
             image_embeds = image_embeds.cpu()
@@ -577,7 +577,7 @@ def evaluate_model(model: torch.nn.Module, test_loader: DataLoader, device: torc
                                 sample_size=500, 
                                 method='umap', 
                                 title="CLIP Embeddings Visualization",
-                                save_path="plots/embeddings_plot_umap.png")
+                                save_path=f"plots/embeddings_plot_umap_{time.time()}.png")
 
 
         visualize_embeddings(all_text_embeds, 
@@ -585,25 +585,21 @@ def evaluate_model(model: torch.nn.Module, test_loader: DataLoader, device: torc
                                 sample_size=500, 
                                 method='tsne',
                                 title="CLIP Embeddings Visualization",
-                                save_path="plots/embeddings_plot_tsne.png")
+                                save_path=f"plots/embeddings_plot_tsne_{time.time()}.png")
         
         visualize_embeddings(all_text_embeds, 
                                 all_image_embeds, 
                                 sample_size=500, 
                                 method='pca',
                                 title="CLIP Embeddings Visualization",
-                                save_path="plots/embeddings_plot_pca.png")
+                                save_path=f"plots/embeddings_plot_pca_{time.time()}.png")
 
-    # should be already normalized
-    # Normalize embeddings for more stable retrieval and metric computations
-    #all_image_embeds = F.normalize(all_image_embeds, dim=-1)
-    #all_text_embeds = F.normalize(all_text_embeds, dim=-1)
+
+    # Normalize embeddings to map the embeddings in a shere of radius 1
     all_image_embeds = all_image_embeds / all_image_embeds.norm(dim=-1, keepdim=True)
     all_text_embeds = all_text_embeds / all_text_embeds.norm(dim=-1, keepdim=True)
 
     # Compute pairwise similarity: [N_text, N_image]
-    # similarity_matrix = all_text_embeds @ all_image_embeds.t() CHECK: MOVED TO GPU
-    
     similarity_matrix = torch.matmul(all_text_embeds.to(device), all_image_embeds.t().to(device))
 
     """SEQUENTIAL COMPUTATION
@@ -751,11 +747,9 @@ def train_model(config, train_loader, test_loader, device):
                 
                 # EXP 1 AND EXP 2
                 if config["loss_type"] == "anchor":
-                    loss = contrastive_loss(image_embeds, text_embeds, temperature=temperature) # check temperature.float() for fp16 compatibility
+                    loss = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
                 
-                
-                
-                # EXP 3, 5
+                # EXP 3 AND EXP 5
                 elif config["loss_type"] == "only_lunif_n_then_anchor+lalign+lunif(text)+lunif(img)":
                     if epoch < config["only_lunif_epochs"]:
                         lunif_img = lunif_loss(image_embeds)
@@ -767,9 +761,7 @@ def train_model(config, train_loader, test_loader, device):
                         lunif = (lunif_loss(image_embeds) + lunif_loss(text_embeds)) / 2
                         loss = anchor + lunif + lalign
                 
-                
-                
-                # EXP 4, 6
+                # EXP 4 AND EXP 6
                 elif config["loss_type"] == "only_lunif_n_then_anchor+lalign+lunif(centroids)":
                 
                     if epoch < config["only_lunif_epochs"]:
@@ -787,8 +779,6 @@ def train_model(config, train_loader, test_loader, device):
                         
                         loss =  anchor + lalign + lunif_centroids
                 
-                
-                    
                     
             # Track useful metrics
             if config["anchor_temperature_learnable"]:
@@ -970,12 +960,6 @@ def main(config):
 
 # In[ ]:
 
-config = {
-    #"resume_checkpoint": "models/model_RN50_anchor+lunif_2025-01-06-23-02-32_epoch_20.pt",
-    #"resume_epoch": 20,
-    #"run_id": "kx8s0k7i",
-    #"resume": "must",
-}
 
 if __name__ == "__main__":
     
@@ -1002,8 +986,15 @@ if __name__ == "__main__":
 # In[ ]:
     
 
-
 """
+
+config = {
+    #"resume_checkpoint": "models/model_RN50_anchor+lunif_2025-01-06-23-02-32_epoch_20.pt",
+    #"resume_epoch": 20,
+    #"run_id": "kx8s0k7i",
+    #"resume": "must",
+}
+
 # NOT USED IN THE EXPERIMENTS
                 elif config["loss_type"] == "lunif":
                     loss = (lunif_loss(image_embeds) + lunif_loss(text_embeds)) / 2
