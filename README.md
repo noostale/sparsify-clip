@@ -41,3 +41,9 @@ The data folder should look like this:
 ```
 
 
+## Metrics
+
+- `cosine similarity`: measures how similar two vectors are in terms of their orientation in a multi-dimensional space, regardless of their magnitude.
+
+- `angular value`: inverse of the cosine similarity, it measures the angle between two vectors.
+

@@ -13,8 +13,6 @@ batch_size: 256
 model: "RN50"
 num_train_samples: -1
 num_test_samples: 512
-
-# Speed-up test parameters
 epochs: 100
 
 # Experiment specific parameters

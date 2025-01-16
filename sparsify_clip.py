@@ -851,7 +851,7 @@ def train_model(config, train_loader, test_loader, device):
                         loss =  anchor + lalign + beta * lunif_centroids
 
                 # EXP 9
-                elif config["loss_type"] == "only_lunif_n_then_anchor+lalign+BETA*lunif(centroids)":
+                elif config["loss_type"] == "only_lunif_n_then_anchor+ALPHA*lalign+BETA*(lunif(text)+lunif(img))":
                     if epoch < config["only_lunif_epochs"]:
                         lunif_img = lunif_loss(image_embeds)
                         lunif_txt = lunif_loss(text_embeds)
@@ -876,7 +876,7 @@ def train_model(config, train_loader, test_loader, device):
   
                 
                 # EXP 10
-                elif config["loss_type"] == "only_lunif_n_then_anchor+lalign+BETA*lunif(centroids)":
+                elif config["loss_type"] == "only_lunif_n_then_anchor+ALPHA*lalign+BETA*lunif(centroids)":
                     if epoch < config["only_lunif_epochs"]:
                         lunif_img = lunif_loss(image_embeds)
                         lunif_txt = lunif_loss(text_embeds)

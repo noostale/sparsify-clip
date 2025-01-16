@@ -13,8 +13,6 @@ batch_size: 256
 model: "RN50"
 num_train_samples: -1
 num_test_samples: 512
-
-# Speed-up test parameters
 epochs: 100
 
 # Experiment specific parameters
@@ -34,7 +32,3 @@ fp16: True
 #BETA CONFIG
 beta_warmup_epoch: 20
 beta_decay_epoch: 50
-
-#ALPHA CONFIG
-alpha_warmup_epoch: 50
-alpha_increment_epoch: 50 
