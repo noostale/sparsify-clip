@@ -38,6 +38,31 @@ warnings.filterwarnings("ignore", message=".*'force_all_finite' was renamed to '
 
 
 # In[2]:
+def get_beta(current_step, total_steps, warmup_epoch=20, decay_epoch=50):
+
+    steps_in_one_epoch = total_steps / 100
+
+
+    if current_step < warmup_epoch*steps_in_one_epoch:
+        return 1.0
+    elif current_step < (warmup_epoch+decay_epoch)*steps_in_one_epoch:
+        return 1.0 - float(current_step - warmup_epoch*steps_in_one_epoch) / float(max(1, decay_epoch*steps_in_one_epoch))
+    else:
+        return 0.0
+
+
+def get_alpha(current_step, total_steps, warmup_epoch=20, increment_epoch=50):
+
+    steps_in_one_epoch = total_steps / 100
+
+
+    if current_step < warmup_epoch*steps_in_one_epoch:
+        return 1.0
+    elif current_step < (warmup_epoch+increment_epoch)*steps_in_one_epoch:
+        return 1.0 + float(current_step - warmup_epoch*steps_in_one_epoch) / float(max(1, increment_epoch*steps_in_one_epoch))
+    else:
+        return 2.0
+    
 
 
 def get_cosine_schedule_with_warmup(optimizer: Optimizer, num_warmup_steps: int, num_training_steps: int, num_cycles: float = 0.5,
@@ -713,6 +738,10 @@ def train_model(config, train_loader, test_loader, device):
     # Make a prior evaluation of the model
     print("Evaluating model before training...")
     evaluate_model(model, test_loader, device)
+
+    # BETA init for EXP 7-8-9-10
+    beta = 0.0
+    alpha = 0.0
     
     # Record start time
     start_time = time.time()
@@ -778,7 +807,101 @@ def train_model(config, train_loader, test_loader, device):
                         lalign = lalign_loss(image_embeds, text_embeds)
                         
                         loss =  anchor + lalign + lunif_centroids
+
+
+                # EXP 7
+                elif config["loss_type"] == "only_lunif_n_then_anchor+lalign+BETA*lunif(centroids)":
+                    if epoch < config["only_lunif_epochs"]:
+                        lunif_img = lunif_loss(image_embeds)
+                        lunif_txt = lunif_loss(text_embeds)
+                        loss = (lunif_img + lunif_txt) / 2
+                    else:
+                        anchor = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
+
+                        lunif = (lunif_loss(image_embeds) + lunif_loss(text_embeds)) / 2
+                        
+                        lalign = lalign_loss(image_embeds, text_embeds)
+                        
+                        beta_warmup_epoch = config["beta_warmup_epoch"]
+                        beta_decay_epoch = config["beta_decay_epoch"]
+                        beta = get_beta(current_batch,t_total,beta_warmup_epoch,beta_decay_epoch)
+                        
+                        loss =  anchor + lalign + beta * lunif
+  
                 
+                # EXP 8
+                elif config["loss_type"] == "only_lunif_n_then_anchor+lalign+BETA*lunif(centroids)":
+                    if epoch < config["only_lunif_epochs"]:
+                        lunif_img = lunif_loss(image_embeds)
+                        lunif_txt = lunif_loss(text_embeds)
+                        loss = (lunif_img + lunif_txt) / 2
+                    else:
+                        anchor = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
+
+                        centroids = compute_centroids_only(image_embeds, text_embeds)
+                        centroids = F.normalize(centroids, dim=-1)
+                        lunif_centroids = lunif_loss(centroids)
+                        
+                        lalign = lalign_loss(image_embeds, text_embeds)
+                        
+                        beta_warmup_epoch = config["beta_warmup_epoch"]
+                        beta_decay_epoch = config["beta_decay_epoch"]
+                        beta = get_beta(current_batch,t_total,beta_warmup_epoch,beta_decay_epoch)
+                        
+                        loss =  anchor + lalign + beta * lunif_centroids
+
+                # EXP 9
+                elif config["loss_type"] == "only_lunif_n_then_anchor+lalign+BETA*lunif(centroids)":
+                    if epoch < config["only_lunif_epochs"]:
+                        lunif_img = lunif_loss(image_embeds)
+                        lunif_txt = lunif_loss(text_embeds)
+                        loss = (lunif_img + lunif_txt) / 2
+                    else:
+                        anchor = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
+
+                        lunif = (lunif_loss(image_embeds) + lunif_loss(text_embeds)) / 2
+                        
+                        lalign = lalign_loss(image_embeds, text_embeds)
+                        
+                        beta_warmup_epoch = config["beta_warmup_epoch"]
+                        beta_decay_epoch = config["beta_decay_epoch"]
+                        beta = get_beta(current_batch,t_total,beta_warmup_epoch,beta_decay_epoch)
+
+                        alpha_warmup_epoch = config["alpha_warmup_epoch"]
+                        alpha_increment_epoch = config["alpha_increment_epoch"]
+
+                        alpha = get_alpha(current_batch,t_total,alpha_warmup_epoch,alpha_increment_epoch)
+                        
+                        loss =  anchor + alpha * lalign + beta * lunif
+  
+                
+                # EXP 10
+                elif config["loss_type"] == "only_lunif_n_then_anchor+lalign+BETA*lunif(centroids)":
+                    if epoch < config["only_lunif_epochs"]:
+                        lunif_img = lunif_loss(image_embeds)
+                        lunif_txt = lunif_loss(text_embeds)
+                        loss = (lunif_img + lunif_txt) / 2
+                    else:
+                        anchor = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
+
+                        centroids = compute_centroids_only(image_embeds, text_embeds)
+                        centroids = F.normalize(centroids, dim=-1)
+                        lunif_centroids = lunif_loss(centroids)
+                        
+                        lalign = lalign_loss(image_embeds, text_embeds)
+                        
+                        beta_warmup_epoch = config["beta_warmup_epoch"]
+                        beta_decay_epoch = config["beta_decay_epoch"]
+                        beta = get_beta(current_batch,t_total,beta_warmup_epoch,beta_decay_epoch)
+
+                        alpha_warmup_epoch = config["alpha_warmup_epoch"]
+                        alpha_increment_epoch = config["alpha_increment_epoch"]
+
+                        alpha = get_alpha(current_batch,t_total,alpha_warmup_epoch,alpha_increment_epoch)
+                        
+                        loss =  anchor + alpha * lalign + beta * lunif_centroids
+                    
+                                
                     
             # Track useful metrics
             if config["anchor_temperature_learnable"]:
@@ -787,8 +910,9 @@ def train_model(config, train_loader, test_loader, device):
                            "learning_rate": scheduler.get_last_lr()[0]})
             else:
                 wandb.log({"train_loss": loss.item(),
-                            "learning_rate": scheduler.get_last_lr()[0]})
-            
+                            "learning_rate": scheduler.get_last_lr()[0],
+                            "beta": beta,
+                            "alpha": alpha})
             # Evaluate the model every n batches
             #if current_batch % 100 == 0:
             #    evaluate_model(model, test_loader, device, plot_embeddings=False)
