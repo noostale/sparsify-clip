@@ -4,7 +4,7 @@
 
 # Identifiers
 project_name: "Sparsify_experiments"
-run_name: "experiment_9-ANCHOR+ALPHA*LALIGN+BETA*LUNIF(TEXT)+BETA*LUNIF(IMG)"
+run_name: "experiment_9-SPARSIFICATION(1E)+ANCHOR+ALPHA*LALIGN+BETA*LUNIF(TEXT)+BETA*LUNIF(IMG)"
 
 # Never change parameters
 seed: 42
@@ -17,7 +17,7 @@ epochs: 100
 
 # Experiment specific parameters
 loss_type: "only_lunif_n_then_anchor+ALPHA*lalign+BETA*(lunif(text)+lunif(img))"
-only_lunif_epochs: 0
+only_lunif_epochs: 1
 anchor_temperature: 0.1
 anchor_temperature_learnable: false
 
