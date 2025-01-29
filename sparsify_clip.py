@@ -900,7 +900,43 @@ def train_model(config, train_loader, test_loader, device):
                         alpha = get_alpha(current_batch,t_total,alpha_warmup_epoch,alpha_increment_epoch)
                         
                         loss =  anchor + alpha * lalign + beta * lunif_centroids
+            
+                ###################################
+                # ABLATION STUDIES BASED ON EXP 4
+                ##################################
+                
+                # COMPLETE LOSS: ANCHOR(IMAGE,TEXT) + LALIGN(IMAGE,TEXT) + LUNIF(CENTROIDS)
+                elif config["loss_type"] == "ANCHOR(IMAGE,TEXT)+LALIGN(IMAGE,TEXT)+LUNIF(CENTROIDS)":
+            
+                    anchor = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
                     
+                    lalign = lalign_loss(image_embeds, text_embeds)
+
+                    centroids = compute_centroids_only(image_embeds, text_embeds)
+                    centroids = F.normalize(centroids, dim=-1)
+                    lunif_centroids = lunif_loss(centroids)
+                    
+                    loss =  anchor + lalign + lunif_centroids
+                
+                # ABLATATION 1: ANCHOR(IMAGE,TEXT) + LALIGN(IMAGE,TEXT)
+                elif config["loss_type"] == "ANCHOR(IMAGE,TEXT)+LALIGN(IMAGE,TEXT)":
+                    
+                    anchor = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
+                    lalign = lalign_loss(image_embeds, text_embeds)
+                    
+                    loss =  anchor + lalign
+                
+                # ABLATION 2: ANCHOR(IMAGE,TEXT) + LUNIF(CENTROIDS)
+                elif config["loss_type"] == "ANCHOR(IMAGE,TEXT)+LUNIF(CENTROIDS)":
+                    
+                    anchor = contrastive_loss(image_embeds, text_embeds, temperature=temperature)
+                    
+                    centroids = compute_centroids_only(image_embeds, text_embeds)
+                    centroids = F.normalize(centroids, dim=-1)
+                    lunif_centroids = lunif_loss(centroids)
+                    
+                    loss =  anchor + lunif_centroids   
+                
                                 
                     
             # Track useful metrics
@@ -1056,6 +1092,9 @@ def main(config):
     # Print the config
     print("Config:", config)
     
+    # Print the experiment name
+    print("Experiment:", config["run_name"])
+    
     # Set the device
     device_id = config["device_id"]
     device = torch.device("cuda:{}".format(device_id) if torch.cuda.is_available() else "cpu")
@@ -1087,24 +1126,38 @@ def main(config):
 
 if __name__ == "__main__":
     
-    parser = argparse.ArgumentParser(description="Run the experiment with a config.yaml file.")
-    parser.add_argument("--config", type=str, required=True, help="Path to the config.yaml file")
+    parser = argparse.ArgumentParser(description="Run the experiment with a config.yaml file")
+    parser.add_argument("--config", type=str, required=True, help="Path to the yaml config file or to a folder containing multiple config files")
     parser.add_argument("--device", type=int, required=True, help="GPU id to use")
     args = parser.parse_args()
     
-    # Load the config file provided from the command line
-    with open(args.config, 'r') as file:
-        config = yaml.safe_load(file)
-
-    # Set the device id
-    config["device_id"] = args.device
+    # Load the config file provided from the command line if the path is a file
+    if os.path.isfile(args.config):
+        with open(args.config, 'r') as file:
+            config = yaml.safe_load(file)
+            # Set the device id
+            config["device_id"] = args.device
+            # Convert learning rate to float
+            config["learning_rate"] = float(config["learning_rate"])
+            # Start the experiment
+            main(config)
     
-    # Convert learning rate to float
-    config["learning_rate"] = float(config["learning_rate"])
-
-    # Start the experiment
-    main(config)
+    # Load all config files in the folder if the path is a folder
+    elif os.path.isdir(args.config):
+        config_files = [f for f in os.listdir(args.config) if f.endswith(".yaml")]
+        for file in config_files:
+            with open(os.path.join(args.config, file), 'r') as f:
+                config = yaml.safe_load(f)
+                # Set the device id
+                config["device_id"] = args.device
+                # Convert learning rate to float
+                config["learning_rate"] = float(config["learning_rate"])
+                # Start the experiment
+                main(config)
     
+    
+
+
     
 
 # In[ ]:

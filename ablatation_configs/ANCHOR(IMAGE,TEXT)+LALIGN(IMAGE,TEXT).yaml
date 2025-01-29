@@ -1,0 +1,30 @@
+
+
+# Identifiers
+project_name: "OpenCL_ablatations_COCO"
+run_name: "ANCHOR(IMAGE,TEXT)+LALIGN(IMAGE,TEXT)"
+
+# Never change parameters
+seed: 42
+learning_rate: 1e-4
+batch_size: 256
+model: "RN50"
+num_train_samples: -1
+num_test_samples: 512
+epochs: 100
+
+# Experiment specific parameters
+loss_type: "ANCHOR(IMAGE,TEXT)+LALIGN(IMAGE,TEXT)"
+only_lunif_epochs: 0
+anchor_temperature: 0.1
+anchor_temperature_learnable: False
+
+# Evaluation and checkpointing
+save_checkpoint_every_n_epochs: 20
+resume_checkpoint: False
+
+# fp16
+fp16: True
+
+
+
